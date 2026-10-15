@@ -7,22 +7,20 @@
 
 # Description
 
-Le projet consiste en la création et la programmation d'une VM en groupe.
+Le projet consiste en la création et la configuration d'une VM en groupe.
 
 ### Contexte
 
-Nous sommes issue d'une entreprise nommé NekoSoft et nous avons comme but de créer et paramétrer une VM
-qui sera par la suite utilisée par les développeurs de notre entreprise.
+Nous sommes issus d'une entreprise nommée NekoSoft et nous avons pour but de créer et paramétrer une VM qui sera par la suite utilisée par les développeurs de notre entreprise.
 
 ### Attentes
 
-notre VM doit contenir :
-1. Des outils de dévelopemments (Apache, MariahDB, PHP, phpMyAdmin).
-2. avoir la possibilitée de développer des sites dans /var/www/html.
-3. un système de sauvegarde automatique.
-4. fond d'écran et personnalisation visuelles en rapport avec notre entreprise.
-5. navigateur par défaut : ABrowser + Ublock Origin.
-
+Notre VM doit contenir :
+1. Des outils de développement (Apache, MariaDB, PHP, phpMyAdmin).
+2. La possibilité de développer des sites dans /var/www/html.
+3. Un système de sauvegarde automatique.
+4. Un fond d'écran et une personnalisation visuelle en rapport avec notre entreprise.
+5. Abrowser comme navigateur par défaut, avec uBlock Origin.
 
 > Pour plus de détails, dirigez-vous vers le wiki : [Wiki](https://github.com/cazzuloa/nekosoft-OS/wiki)
 
