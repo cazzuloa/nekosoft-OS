@@ -5,6 +5,12 @@
 
 ![NekoSoft OS](wallpapers/nekosoft-wallpaper-1920x1080.png)
 
+# Description
+
+TODO
+
+> Pour plus de détails, dirigez-vous vers le wiki : [Wiki](https://github.com/cazzuloa/nekosoft-OS/wiki)
+
 # Installation
 
 ## Prérequis
@@ -40,3 +46,11 @@ qemu-img create -f qcow2 trisquel-disk.img 20G
 chmod +x ./scripts/boot-live.sh
 ./scripts/boot-live.sh
 ```
+
+# Todo 
+
+- [x] Finir le markdown et le wiki.
+
+# License
+
+Ce projet est sous licence MIT — voir le fichier LICENSE pour plus de détails.
