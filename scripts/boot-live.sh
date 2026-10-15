@@ -1,5 +1,5 @@
 #!/bin/bash
-# Boot live ISO (installation) — équivalent VM 2 CPU / 4 Go / 20 Go, CD-ROM SATA prio 1
+# NekoSoft - boot live ISO (2 CPU / 4 Go / CD-ROM prio 1)
 cd "$(dirname "$0")"
 exec qemu-system-x86_64 \
   -enable-kvm -cpu host -smp 2 -m 4G \
