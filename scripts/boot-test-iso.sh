@@ -1,6 +1,5 @@
 #!/bin/bash
-# Test ISO NekoSoft en live + install sur disque vierge 20Go
-# VM de test séparée : port SSH 2223 (la VM dev utilise 2222)
+# NekoSoft - test ISO en live + install (disque vierge 20 Go, SSH host:2223)
 cd "$(dirname "$0")"
 exec qemu-system-x86_64 \
   -enable-kvm -cpu host -smp 2 -m 4G \
