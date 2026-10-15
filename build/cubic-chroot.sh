@@ -1,15 +1,20 @@
 #!/bin/bash
-# NekoSoft - script chroot Cubic (LAMP + Forgejo + backup + desktop + ABrowser)
+# NekoSoft SAE103 - CUBIC CHROOT
+# À coller DANS le terminal chroot de Cubic (onglet Terminal, tu es déjà root)
+# Ne lance PAS les 00-04 ici (systemd ne tourne pas en chroot).
+# Ce script fait tout en mode "image" : install + enable, pas de start.
 set -eux
 
 export DEBIAN_FRONTEND=noninteractive
 
+# --- 0. Vérifs ---
 df -h /
 ls -lh /usr/share/backgrounds/ || true
 cat /etc/os-release | head -3
 
 apt update
 
+# --- 1. LAMP + outils (SANS démarrer les services) ---
 apt install -y \
   apache2 mariadb-server \
   php libapache2-mod-php php-mysql php-cli php-mbstring php-zip php-gd php-curl \
@@ -21,20 +26,24 @@ apt install -y \
   lightdm-gtk-greeter-settings \
   wget curl unzip
 
+# conf phpmyadmin -> apache (sans restart, Cubic s'en charge au boot)
 if [ ! -e /etc/apache2/conf-enabled/phpmyadmin.conf ] && [ -e /etc/phpmyadmin/apache.conf ]; then
   ln -sf /etc/phpmyadmin/apache.conf /etc/apache2/conf-available/phpmyadmin.conf
   a2enconf phpmyadmin || true
 fi
 a2enmod php || true
 
-# Pas de --now en chroot (pas de systemd actif) : enable uniquement
+# enable seulement (pas de --now, pas de systemd en chroot)
 systemctl enable apache2 mariadb ssh || true
 
+# /var/www/html modèle : droits + page test
 chown -R www-data:www-data /var/www/html
 chmod -R 775 /var/www/html
 chmod g+s /var/www/html
 echo "<?php phpinfo(); ?>" > /var/www/html/info.php
 chown www-data:www-data /var/www/html/info.php
+# groupe www-data pour futurs devs (le user sera créé à l'install)
+# + page d'accueil NekoSoft
 cat > /var/www/html/index.html <<'EOF'
 <!DOCTYPE html><html lang="fr"><head><meta charset="utf-8">
 <title>NekoSoft 🐾 poste dev</title>
@@ -45,7 +54,7 @@ cat > /var/www/html/index.html <<'EOF'
 EOF
 chown www-data:www-data /var/www/html/index.html
 
-# Forgejo : binaire + service enable (demarre au boot, pas en chroot)
+# --- 2. Forgejo (binaire + service enabled, pas started) ---
 FORGEJO_VERSION="12.0.3"
 id git 2>/dev/null || adduser --system --shell /bin/bash --gecos 'Git Version Control' --group --disabled-password --home /home/git git
 mkdir -p /var/lib/forgejo /etc/forgejo /var/log/forgejo
@@ -87,7 +96,7 @@ WantedBy=multi-user.target
 EOF
 systemctl enable forgejo || true
 
-# Backup chiffre : script + cron (init au premier boot)
+# --- 3. Backup chiffré (script + cron, init au 1er boot) ---
 mkdir -p /var/backups; chmod 700 /var/backups
 cat > /usr/local/bin/nekosoft-backup.sh <<'EOF'
 #!/bin/bash
@@ -105,24 +114,59 @@ chmod +x /usr/local/bin/nekosoft-backup.sh
 echo "0 2 * * * root /usr/local/bin/nekosoft-backup.sh >> /var/log/nekosoft-backup.log 2>&1" > /etc/cron.d/nekosoft-backup
 chmod 644 /etc/cron.d/nekosoft-backup
 
-# Wallpaper : PNG copie avant via Cubic (onglet Files)
+# --- 4. Wallpaper + LXDE + LightDM + /etc/skel ---
+# Le PNG doit être copié AVANT : dans Cubic, onglet Files ou :
+#   wget http://10.0.2.2:8000/nekosoft-pack/nekosoft-wallpaper-1920x1080.png -O /tmp/wall.png
 WALL_SRC=""
 for c in ./nekosoft-wallpaper-1920x1080.png /tmp/wall.png /tmp/nekosoft-wallpaper-1920x1080.png /root/nekosoft-wallpaper-1920x1080.png; do
   [ -f "$c" ] && WALL_SRC="$c" && break
 done
 if [ -z "$WALL_SRC" ]; then
-  echo "ERREUR: wallpaper introuvable dans ./ /tmp/ /root/"
+  echo "ERREUR: wallpaper introuvable. Fais avant :"
+  echo "  wget http://10.0.2.2:8000/nekosoft-pack/nekosoft-wallpaper-1920x1080.png -O /tmp/wall.png"
   exit 1
 fi
 mkdir -p /usr/share/backgrounds
 cp "$WALL_SRC" /usr/share/backgrounds/nekosoft-wallpaper.png
 chmod 644 /usr/share/backgrounds/nekosoft-wallpaper.png
 
-# LXDE utilise le profil "lxde" : fournir default + lxde
-mkdir -p /etc/skel/.config/pcmanfm/default /etc/skel/.config/pcmanfm/lxde
-cat > /etc/skel/.config/pcmanfm/default/desktop-items-0.conf <<'EOF'
+# Helper robuste commun (tous profils + CLI valide stretch)
+cat > /usr/local/bin/nekosoft-wallpaper.sh <<'SCRIPTEOF'
+#!/bin/bash
+WALL=/usr/share/backgrounds/nekosoft-wallpaper.png
+[ -f "$WALL" ] || exit 0
+for p in Trisquel-mini trisquel-mini LXDE lxde default; do
+  D="$HOME/.config/pcmanfm/$p"
+  mkdir -p "$D"
+  cat > "$D/desktop-items-0.conf" <<CONF
 [*]
-wallpaper_mode=fill
+wallpaper_mode=stretch
+wallpaper_common=1
+wallpaper=$WALL
+desktop_bg=#1E1B2E
+desktop_fg=#FFFFFF
+desktop_shadow=#000000
+show_wm_menu=0
+sort=mtime;ascending;
+show_documents=0
+show_trash=1
+show_mounts=1
+CONF
+done
+if [ -n "${DISPLAY:-}" ] && command -v pcmanfm >/dev/null 2>&1; then
+  pcmanfm --set-wallpaper="$WALL" --wallpaper-mode=stretch || true
+  pcmanfm --reconfigure || true
+fi
+exit 0
+SCRIPTEOF
+chmod 755 /usr/local/bin/nekosoft-wallpaper.sh
+
+# Profils : la session Trisquel-mini lit "Trisquel-mini", LXDE lit "LXDE"/"lxde".
+for p in default lxde LXDE Trisquel-mini trisquel-mini; do
+  mkdir -p "/etc/skel/.config/pcmanfm/$p"
+  cat > "/etc/skel/.config/pcmanfm/$p/desktop-items-0.conf" <<'EOF'
+[*]
+wallpaper_mode=stretch
 wallpaper_common=1
 wallpaper=/usr/share/backgrounds/nekosoft-wallpaper.png
 desktop_bg=#1E1B2E
@@ -134,21 +178,31 @@ show_documents=0
 show_trash=1
 show_mounts=1
 EOF
-cp /etc/skel/.config/pcmanfm/default/desktop-items-0.conf /etc/skel/.config/pcmanfm/lxde/desktop-items-0.conf
+done
+chmod -R a+rX /etc/skel/.config/pcmanfm
+# Autostart système : force le fond à chaque login LXDE
 cat > /etc/xdg/autostart/nekosoft-wallpaper.desktop <<'EOF'
 [Desktop Entry]
 Type=Application
 Name=NekoSoft Wallpaper
 Comment=Applique le fond d'ecran NekoSoft au demarrage de session
-Exec=sh -c "sleep 2; pcmanfm --set-wallpaper /usr/share/backgrounds/nekosoft-wallpaper.png --wallpaper-mode=fill"
+Exec=/usr/local/bin/nekosoft-wallpaper.sh
 OnlyShowIn=LXDE;
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
+X-LXDE-Autostart-enabled=true
 EOF
 chmod 644 /etc/xdg/autostart/nekosoft-wallpaper.desktop
 mkdir -p /etc/skel/.config/autostart
 cp /etc/xdg/autostart/nekosoft-wallpaper.desktop /etc/skel/.config/autostart/
+# Autostart natif lxsession (fiable, lu avant pcmanfm --desktop)
+for S in LXDE Trisquel-mini; do
+  F="/etc/xdg/lxsession/$S/autostart"
+  [ -f "$F" ] || continue
+  grep -q "nekosoft-wallpaper" "$F" || echo "@/usr/local/bin/nekosoft-wallpaper.sh" >> "$F"
+done
 
+if ! grep -q "NekoSoft" /etc/skel/.bashrc 2>/dev/null; then
 cat >> /etc/skel/.bashrc <<'EOF'
 
 # --- NekoSoft ---
@@ -157,20 +211,21 @@ alias ll='ls -lh --color'
 alias www='cd /var/www/html'
 alias logs='sudo journalctl -xeu apache2 -u mariadb -u forgejo'
 EOF
-
-mkdir -p /etc/lightdm
-if ! grep -q "nekosoft-wallpaper" /etc/lightdm/lightdm-gtk-greeter.conf 2>/dev/null; then
-  cat >> /etc/lightdm/lightdm-gtk-greeter.conf <<EOF
-
-[greeter]
-background=/usr/share/backgrounds/nekosoft-wallpaper.png
-theme-name=Adwaita-dark
-icon-theme-name=elementary
-font-name=Cantarell 11
-EOF
 fi
 
-# ABrowser FR + uBlock force
+mkdir -p /etc/lightdm
+python3 <<'PYEOF'
+import re
+p = "/etc/lightdm/lightdm-gtk-greeter.conf"
+t = open(p).read()
+t = re.sub(r"^\[greeter\]\nbackground=.*\n(?:theme-name=.*\n)?(?:icon-theme-name=.*\n)?(?:font-name=.*\n)?", "", t, flags=re.M)
+t = re.sub(r"\n{3,}", "\n\n", t)
+if "nekosoft-wallpaper" not in t:
+    t = t.rstrip() + "\n\n[greeter]\nbackground=/usr/share/backgrounds/nekosoft-wallpaper.png\ntheme-name=Adwaita-dark\nicon-theme-name=elementary\nfont-name=Cantarell 11\n"
+open(p, "w").write(t)
+PYEOF
+
+# --- 5. ABrowser FR + uBlock forcé ---
 update-locale LANG=fr_FR.UTF-8 LANGUAGE=fr_FR:fr || true
 locale-gen fr_FR.UTF-8 || true
 UBLOCK_URL="https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi"
@@ -189,7 +244,8 @@ cat > "$D/policies.json" <<POLEOF
 POLEOF
 done
 
+# --- 6. Nettoyage pour ISO légère ---
 apt clean
 rm -rf /tmp/* /var/tmp/* /var/log/*.gz || true
 du -sh /usr/share/backgrounds/nekosoft-wallpaper.png
-echo "== CUBIC CHROOT OK =="
+echo "== CUBIC CHROOT OK. Clique Next dans Cubic pour générer l'ISO. =="
