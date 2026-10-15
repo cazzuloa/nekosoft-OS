@@ -1,5 +1,12 @@
  # NekoSoft OS
 
+![License](https://img.shields.io/badge/License-MIT-green.svg)
+![OS](https://img.shields.io/badge/OS-Trisquel%2012.0%20Mini-blue.svg)
+![Virtualisation](https://img.shields.io/badge/Virtualisation-QEMU-orange.svg)
+![Projet](https://img.shields.io/badge/Projet-SAE%20103-purple.svg)
+![GitHub last commit](https://img.shields.io/github/last-commit/cazzuloa/nekosoft-OS)
+![GitHub repo size](https://img.shields.io/github/repo-size/cazzuloa/nekosoft-OS)
+
 **SAE 103**  
 *Installation d'un poste pour le développement. Basé sur Trisquel 12.0 Mini*
 
@@ -23,6 +30,19 @@ Notre VM doit contenir :
 5. Abrowser comme navigateur par défaut, avec uBlock Origin.
 
 > Pour plus de détails, dirigez-vous vers le wiki : [Wiki](https://github.com/cazzuloa/nekosoft-OS/wiki)
+
+## Fonctionnalités et technologies
+
+| Fonctionnalité | Technologie | Description |
+|---|---|---|
+| Système d'exploitation | Trisquel 12.0 Mini | Système de base de la VM |
+| Serveur web | Apache | Hébergement des sites web |
+| Base de données | MariaDB | Stockage des données |
+| Backend | PHP | Exécution du code serveur |
+| Administration BDD | phpMyAdmin | Gestion des bases de données |
+| Navigateur | Abrowser + uBlock Origin | Navigation web |
+| Virtualisation | QEMU | Exécution de la machine virtuelle |
+| Sauvegardes | À préciser | Sauvegarde automatique des données |
 
 # Installation
 
