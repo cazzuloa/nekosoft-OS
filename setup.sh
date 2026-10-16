@@ -3,18 +3,20 @@
 # Projet SAE 1.03
 # Tout droit réserver @cazzuloa | https://github.com/cazzuloa/nekosoft-OS
 
-set -eux
+set -euo pipefail
+# -x uniquement en debug : DEBUG=1 sudo -E bash setup.sh
+if [[ "${DEBUG:-0}" == "1" ]]; then
+    set -x
+fi
 
-if [[ -n "$SUDO_USER" ]]; then
-    sleep 1 
-elif [[ $EUID -eq 0 ]]; then
-    sleep 1
-else
-    echo "[ERREUR] Le script n'a pas les privilèges root (lancé par un utilisateur standard)."
+# Root requis : tout le script (apt, systemctl, mysql, /etc, /home/...) l'exige.
+if [[ "$(id -u)" -ne 0 ]]; then
+    echo "[ERREUR] Lancer en root : sudo bash $0" >&2
+    exit 1
 fi
 
 function __banner() {
-    clear
+    clear || true
 
     echo "[0;35m          [0;37m [0;35m          [0;37m [0;35m▐▓▒▒      [0;37m [0;35m          [0;37m [0;35m          [0;37m [0;35m          [0;37m [0;35m ▄▓████▄[0;37m [0;35m▐▓▓▒   [0m"
     echo "[0;35m          [0;37m [0;35m          [0;37m [0;35m▐▓▓▓  ▄[0;90;45m▀▀[0;90m▄[0;37m [0;35m          [0;37m [0;35m          [0;37m [0;35m          [0;37m [0;35m▐██▓ ▀██[0;37m [0;35m▐██▓   [0m"
@@ -35,11 +37,33 @@ function __banner() {
 __banner
 
 export DEBIAN_FRONTEND=noninteractive
-DEV_USER="${DEV_USER:-$(logname 2>/dev/null || echo $SUDO_USER)}"
+# Utilisateur dev réel : SUDO_USER en priorité (sudo bash setup.sh),
+# sinon logname, sinon premier utilisateur avec un /home/*.
+# On valide qu'il existe, sinon usermod/chown planteraient plus loin.
+if [[ -z "${DEV_USER:-}" ]]; then
+    DEV_USER="${SUDO_USER:-}"
+fi
+if [[ -z "${DEV_USER:-}" ]]; then
+    DEV_USER="$(logname 2>/dev/null || true)"
+fi
+if [[ -z "${DEV_USER:-}" ]]; then
+    DEV_USER="$(ls -1 /home 2>/dev/null | head -n1 || true)"
+fi
+if [[ -z "${DEV_USER:-}" ]] || ! id "$DEV_USER" >/dev/null 2>&1; then
+    echo "[ERREUR] Utilisateur dev introuvable (DEV_USER vide ou inexistant)." >&2
+    echo "         Lance avec : sudo DEV_USER=test bash $0" >&2
+    exit 1
+fi
 echo "[@] NekoSoft install - user dev: $DEV_USER"
 
 echo "[@] Mise à jour de la liste des paquets"
 apt update
+
+# phpMyAdmin en non-interactif : pré-sélection debconf pour éviter le prompt
+# du choix du serveur web (apache2) et de dbconfig-common.
+echo "[@] Pré-configuration phpMyAdmin (debconf non-interactif)"
+echo "phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2" | debconf-set-selections || true
+echo "phpmyadmin phpmyadmin/dbconfig-install boolean true" | debconf-set-selections || true
 
 echo "[@] Installation des paquets necessaire"
 apt install -y \
@@ -62,15 +86,61 @@ fi
 
 # Services
 echo "[@] Activation des services apache2, mariadb et ssh"
-systemctl enable --now apache2 mariadb ssh
+if pidof systemd >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
+    systemctl enable --now apache2 mariadb ssh
+else
+    # Conteneur / live sans systemd : démarre au mieux, sans faire échouer le deploy.
+    service mariadb start || service mysql start || true
+    service apache2 start || true
+    service ssh start || true
+fi
 
-# MariaDB sécur mini (sans mysql_secure_installation interactif)
+# MariaDB sécur mini (idempotent : relançable sans planter).
+# Contexte du bug : l'ancien script faisait
+#   ALTER USER 'root'@'localhost' ACCOUNT LOCK;
+# Au 2e lancement, 'mysql -e ...' en root via unix_socket échouait avec
+#   ERROR 4151 (HY000): Access denied, this account is locked
+# et 'set -e' stoppait tout le déploiement (Forgejo, Borg, fond d'écran...).
+# On ne locke PLUS root : sur Ubuntu/Trisquel root est déjà en unix_socket
+# (connexion locale root-only, sans mot de passe réseau) : c'est sécurisé
+# ET ça garde mysqldump + phpmyadmin + relances fonctionnels.
 echo "[@] MariaDB sécur mini"
-mysql -e "CREATE USER 'admin'@'localhost' IDENTIFIED BY 'nekosoft-root';"
-mysql -e "GRANT ALL PRIVILEGES ON *.* TO 'admin'@'localhost' WITH GRANT OPTION;"
-mysql -e "FLUSH PRIVILEGES;"
-mysql -e "ALTER USER 'root'@'localhost' ACCOUNT LOCK;"
-mysql -e "FLUSH PRIVILEGES;"
+echo "[@] Attente du démarrage de MariaDB"
+for i in $(seq 1 30); do
+    if mariadb-admin --user=root ping --silent 2>/dev/null \
+        || mysqladmin --user=root ping --silent 2>/dev/null; then
+        break
+    fi
+    if [[ "$i" -eq 30 ]]; then
+        echo "[ERREUR] MariaDB ne répond pas après 30s (mariadb-admin ping)" >&2
+        exit 1
+    fi
+    sleep 1
+done
+
+# Helper : exécute SQL en root via unix_socket, avec fallback debian-sys-maint.
+# Le fallback répare les VM déjà cassées par l'ancien script (root locké).
+mysql_root() {
+    if mysql --user=root -e "SELECT 1;" >/dev/null 2>&1; then
+        mysql --user=root "$@"
+    elif [[ -f /etc/mysql/debian.cnf ]] && mysql --defaults-file=/etc/mysql/debian.cnf -e "SELECT 1;" >/dev/null 2>&1; then
+        echo "[@] root MariaDB verrouillé par un ancien run : connexion via debian-sys-maint pour réparer"
+        mysql --defaults-file=/etc/mysql/debian.cnf "$@"
+    else
+        # Dernier recours : laisse l'erreur remonter avec un message clair.
+        mysql --user=root "$@"
+    fi
+}
+# Répare un éventuel LOCK posé par l'ancien script, puis sécurise sans locker.
+mysql_root -e "ALTER USER 'root'@'localhost' ACCOUNT UNLOCK;"
+mysql_root -e "DELETE FROM mysql.user WHERE User='';"
+mysql_root -e "DROP DATABASE IF EXISTS test;"
+mysql_root -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
+# Admin applicatif : IF NOT EXISTS + ALTER => mot de passe à jour à chaque run.
+mysql_root -e "CREATE USER IF NOT EXISTS 'admin'@'localhost' IDENTIFIED BY 'nekosoft-root';"
+mysql_root -e "ALTER USER 'admin'@'localhost' IDENTIFIED BY 'nekosoft-root';"
+mysql_root -e "GRANT ALL PRIVILEGES ON *.* TO 'admin'@'localhost' WITH GRANT OPTION;"
+mysql_root -e "FLUSH PRIVILEGES;"
 
 
 # /var/www/html accessible au dev
@@ -160,7 +230,7 @@ systemctl status forgejo --no-pager | head -15
 
 
 echo "[@] Préparation des sauvegardes Borg"
-DEV_USER="${DEV_USER:-$(logname 2>/dev/null || echo $SUDO_USER)}"
+# DEV_USER déjà validé en tête de script : ne pas le réécraser (logname échoue en root).
 REPO="/var/backups/nekosoft-borg"
 PASSPHRASE_FILE="/root/.borg-passphrase"
 
@@ -175,7 +245,7 @@ if [ ! -f "$PASSPHRASE_FILE" ]; then
     chmod 600 "$PASSPHRASE_FILE"
     echo "Passphrase générée dans $PASSPHRASE_FILE"
 fi
-export BORG_PASSPHRASE="$(cat $PASSPHRASE_FILE)"
+export BORG_PASSPHRASE="$(cat "$PASSPHRASE_FILE")"
 
 # init repo chiffré repokey-blake2 si nouveau
 if [ ! -d "$REPO" ]; then
@@ -190,8 +260,8 @@ cat > /usr/local/bin/nekosoft-backup.sh <<'EOF'
 set -eu
 export BORG_PASSPHRASE="$(cat /root/.borg-passphrase)"
 REPO="/var/backups/nekosoft-borg"
-# dump SQL avant borg
-mysqldump --all-databases | gzip > /var/backups/all-databases.sql.gz || true
+# dump SQL avant borg (root via unix_socket : fonctionne car on ne locke plus root)
+mariadb-dump --user=root --all-databases 2>/dev/null | gzip > /var/backups/all-databases.sql.gz || mysqldump --user=root --all-databases 2>/dev/null | gzip > /var/backups/all-databases.sql.gz || true
 borg create --stats --compression lz4 \
     "$REPO::{now:%Y-%m-%d_%H:%M}" \
     /var/www/html \
@@ -207,7 +277,7 @@ chmod +x /usr/local/bin/nekosoft-backup.sh
 
 # 1ère sauvegarde immédiate (preuve démo)
 echo "[@] Exécution de la première sauvegarde Borg"
-BORG_PASSPHRASE="$(cat $PASSPHRASE_FILE)" /usr/local/bin/nekosoft-backup.sh || true
+BORG_PASSPHRASE="$(cat "$PASSPHRASE_FILE")" /usr/local/bin/nekosoft-backup.sh || true
 borg list "$REPO" || true
 
 # cron quotidien 2h
@@ -221,13 +291,18 @@ echo "[@] Pour la soutenance : borg info $REPO montre le chiffrement repokey"
 echo "[@] Configuration du fond d'écran NekoSoft"
 WALL_URL="https://raw.githubusercontent.com/cazzuloa/nekosoft-OS/main/wallpapers/nekosoft-wallpaper-1920x1080.png"
 WALL_DST="/usr/share/backgrounds/nekosoft-wallpaper.png"
-DEV_USER="${DEV_USER:-$(logname 2>/dev/null || echo $SUDO_USER)}"
+# DEV_USER déjà validé en tête de script.
 
 # 1. Installer le fond système
 echo "[@] Téléchargement et installation du fond d'écran système"
 mkdir -p /usr/share/backgrounds
-wget -O "$WALL_DST" "$WALL_URL"
+if ! wget -O "$WALL_DST" "$WALL_URL"; then
+    echo "[ATTENTION] Fond d'écran non téléchargé (hors-ligne ?) : suite sans wallpaper" >&2
+    WALL_DST=""
+fi
+if [[ -n "$WALL_DST" ]]; then
 chmod 644 "$WALL_DST"
+fi
 
 # 2. Config PCManFM (gestionnaire bureau LXDE) pour l'utilisateur actuel
 # La session Trisquel-mini lit le profil "Trisquel-mini", pas "default".
@@ -350,6 +425,7 @@ mkdir -p "/home/$DEV_USER/.config/geany"
 # Trisquel Mini : vrai fichier = /etc/lightdm/lightdm-gtk-greeter.conf (pas de .d/)
 # Idempotent : nettoie les anciens blocs ajoutés avant de réécrire (évite doublons [greeter])
 echo "[@] Configuration de l'écran de connexion LightDM avec le fond NekoSoft"
+if [[ -f /etc/lightdm/lightdm-gtk-greeter.conf ]]; then
 python3 <<'PYEOF'
 import re
 p = "/etc/lightdm/lightdm-gtk-greeter.conf"
@@ -360,6 +436,9 @@ if "nekosoft-wallpaper" not in t:
     t = t.rstrip() + "\n\n[greeter]\nbackground=/usr/share/backgrounds/nekosoft-wallpaper.png\ntheme-name=Adwaita-dark\nicon-theme-name=elementary\nfont-name=Cantarell 11\n"
 open(p, "w").write(t)
 PYEOF
+else
+    echo "[ATTENTION] /etc/lightdm/lightdm-gtk-greeter.conf absent (pas de LightDM ?) : étape ignorée" >&2
+fi
 
 # 5. Appliquer immédiatement si session LXDE active (ne casse rien sinon)
 echo "[@] Application immédiate du fond d'écran et réparation des profils PCManFM"
@@ -414,7 +493,6 @@ done
 # 3. Page d'accueil NekoSoft + moteur fr pour tout nouvel user via /etc/skel
 mkdir -p /etc/skel/.mozilla
 # On copie le profil actuel si uBlock déjà installé manuellement (bonus, pas obligatoire)
-DEV_USER="${DEV_USER:-$(logname 2>/dev/null || echo $SUDO_USER)}"
 if [ -d "/home/$DEV_USER/.mozilla" ]; then
     cp -a "/home/$DEV_USER/.mozilla/." /etc/skel/.mozilla/ || true
 fi
@@ -422,14 +500,7 @@ fi
 echo "[@] ABrowser configuré. Vérification : abrowser about:policies doit montrer uBlock force_installed"
 echo "[@] Si besoin, installation manuelle de démonstration : https://addons.mozilla.org/fr/firefox/addon/ublock-origin/"
 
-export DEBIAN_FRONTEND=noninteractive
-DEV_USER="${DEV_USER:-$(logname 2>/dev/null || echo $SUDO_USER)}"
-
-# 0. Root requis
-if [ "$(id -u)" -ne 0 ]; then
-    echo "ERREUR: lancer en root : sudo bash $0"
-    exit 1
-fi
+# --- Kodi : root déjà vérifié en tête de script, rien à re-vérifier ici ---
 
 # 1. Dépôt universe (Trisquel/Ubuntu) : Kodi y est, 100% libre, pas de PPA/snap/flatpak
 # Justification soutenance : on reste sur dépôt officiel libre, sans binaire proprio.
