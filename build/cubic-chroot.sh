@@ -207,6 +207,11 @@ cat >> /etc/skel/.bashrc <<'EOF'
 
 # --- NekoSoft ---
 export PS1='\[\e[38;5;177m\]nekosoft🐾 \w \$ \[\e[0m\]'
+# Fix #4 : bleu fonce (di=01;34) illisible sur fond sombre -> dossiers en cyan clair
+if [ -x /usr/bin/dircolors ]; then
+  eval "$(dircolors -b)"
+fi
+export LS_COLORS="di=01;36:${LS_COLORS//di=01;34/di=01;36}"
 alias ll='ls -lh --color'
 alias www='cd /var/www/html'
 alias logs='sudo journalctl -xeu apache2 -u mariadb -u forgejo'
