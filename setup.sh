@@ -57,7 +57,7 @@ fi
 echo "[@] NekoSoft install - user dev: $DEV_USER"
 
 echo "[@] Mise à jour de la liste des paquets"
-apt update
+apt update && apt upgrade
 
 # phpMyAdmin en non-interactif : pré-sélection debconf pour éviter le prompt
 # du choix du serveur web (apache2) et de dbconfig-common.
@@ -118,29 +118,103 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
-# Helper : exécute SQL en root via unix_socket, avec fallback debian-sys-maint.
-# Le fallback répare les VM déjà cassées par l'ancien script (root locké).
-mysql_root() {
-    if mysql --user=root -e "SELECT 1;" >/dev/null 2>&1; then
-        mysql --user=root "$@"
-    elif [[ -f /etc/mysql/debian.cnf ]] && mysql --defaults-file=/etc/mysql/debian.cnf -e "SELECT 1;" >/dev/null 2>&1; then
-        echo "[@] root MariaDB verrouillé par un ancien run : connexion via debian-sys-maint pour réparer"
-        mysql --defaults-file=/etc/mysql/debian.cnf "$@"
+# Helper : exécute SQL en root via unix_socket, avec réparation auto si locké.
+# Niveau 1 : root unix_socket direct (cas nominal).
+# Niveau 2 : debian-sys-maint (si présent, répare un LOCK posé par l'ancien script).
+# Niveau 3 : redémarrage temporaire en skip-grant-tables (récupération root
+#             standard, sans aucun mot de passe : fonctionne même si
+#             /etc/mysql/debian.cnf n'existe pas, comme sur Trisquel Mini).
+__mariadb_service() {
+    # $1 = start|stop|restart
+    if pidof systemd >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
+        systemctl "$1" mariadb 2>/dev/null || systemctl "$1" mysql 2>/dev/null || true
     else
-        # Dernier recours : laisse l'erreur remonter avec un message clair.
-        mysql --user=root "$@"
+        service mariadb "$1" 2>/dev/null || service mysql "$1" 2>/dev/null || true
     fi
 }
+__mariadb_wait_alive() {
+    # $1 = tentatives max (défaut 30)
+    local n="${1:-30}"
+    for i in $(seq 1 "$n"); do
+        if mariadb-admin ping --silent 2>/dev/null \
+            || mysqladmin ping --silent 2>/dev/null; then
+            return 0
+        fi
+        if [[ "$i" -eq "$n" ]]; then
+            return 1
+        fi
+        sleep 1
+    done
+}
+__mariadb_unlock_skip_grant() {
+    echo "[@] Réparation root MariaDB via skip-grant-tables (aucun mot de passe requis)"
+    __mariadb_service stop
+    sleep 3
+    mkdir -p /run/mysqld || true
+    chown mysql:mysql /run/mysqld 2>/dev/null || chown mysql /run/mysqld 2>/dev/null || true
+    REPAIR_LOG="/var/log/mariadb-repair.log"
+    touch "$REPAIR_LOG" 2>/dev/null || REPAIR_LOG="/tmp/mariadb-repair.log"
+    if command -v mysqld_safe >/dev/null 2>&1; then
+        mysqld_safe --skip-grant-tables --skip-networking >>"$REPAIR_LOG" 2>&1 &
+    else
+        mariadbd-safe --skip-grant-tables --skip-networking >>"$REPAIR_LOG" 2>&1 &
+    fi
+    local repair_pid=$!
+    local ok=0
+    for i in $(seq 1 30); do
+        if mysql --user=root -e "SELECT 1;" >/dev/null 2>&1; then
+            ok=1
+            break
+        fi
+        sleep 1
+    done
+    if [[ "$ok" -ne 1 ]]; then
+        echo "[ERREUR] Serveur de réparation MariaDB injoignable (voir $REPAIR_LOG)" >&2
+        kill "$repair_pid" 2>/dev/null || true
+        return 1
+    fi
+    mysql --user=root -e "FLUSH PRIVILEGES;"
+    mysql --user=root -e "ALTER USER 'root'@'localhost' ACCOUNT UNLOCK;"
+    mysql --user=root -e "ALTER USER 'root'@'localhost' IDENTIFIED VIA unix_socket;"
+    mysql --user=root -e "FLUSH PRIVILEGES;"
+    mysqladmin --user=root shutdown || kill "$repair_pid" 2>/dev/null || true
+    wait "$repair_pid" 2>/dev/null || true
+    sleep 3
+    __mariadb_service start
+    if ! __mariadb_wait_alive 30; then
+        echo "[ERREUR] MariaDB ne redémarre pas après réparation" >&2
+        return 1
+    fi
+    return 0
+}
+# Canal SQL privilégié : tableau MYSQL_ADMIN.
+MYSQL_ADMIN=()
+if mysql --user=root -e "SELECT 1;" >/dev/null 2>&1; then
+    MYSQL_ADMIN=(mysql --user=root)
+elif [[ -f /etc/mysql/debian.cnf ]] && mysql --defaults-file=/etc/mysql/debian.cnf -e "SELECT 1;" >/dev/null 2>&1; then
+    echo "[@] root MariaDB verrouillé par un ancien run : réparation via debian-sys-maint"
+    MYSQL_ADMIN=(mysql --defaults-file=/etc/mysql/debian.cnf)
+else
+    if ! __mariadb_unlock_skip_grant; then
+        exit 1
+    fi
+    MYSQL_ADMIN=(mysql --user=root)
+fi
 # Répare un éventuel LOCK posé par l'ancien script, puis sécurise sans locker.
-mysql_root -e "ALTER USER 'root'@'localhost' ACCOUNT UNLOCK;"
-mysql_root -e "DELETE FROM mysql.user WHERE User='';"
-mysql_root -e "DROP DATABASE IF EXISTS test;"
-mysql_root -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
+"${MYSQL_ADMIN[@]}" -e "ALTER USER 'root'@'localhost' ACCOUNT UNLOCK;"
+"${MYSQL_ADMIN[@]}" -e "ALTER USER 'root'@'localhost' IDENTIFIED VIA unix_socket;"
+"${MYSQL_ADMIN[@]}" -e "DELETE FROM mysql.user WHERE User='';"
+"${MYSQL_ADMIN[@]}" -e "DROP DATABASE IF EXISTS test;"
+"${MYSQL_ADMIN[@]}" -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
 # Admin applicatif : IF NOT EXISTS + ALTER => mot de passe à jour à chaque run.
-mysql_root -e "CREATE USER IF NOT EXISTS 'admin'@'localhost' IDENTIFIED BY 'nekosoft-root';"
-mysql_root -e "ALTER USER 'admin'@'localhost' IDENTIFIED BY 'nekosoft-root';"
-mysql_root -e "GRANT ALL PRIVILEGES ON *.* TO 'admin'@'localhost' WITH GRANT OPTION;"
-mysql_root -e "FLUSH PRIVILEGES;"
+"${MYSQL_ADMIN[@]}" -e "CREATE USER IF NOT EXISTS 'admin'@'localhost' IDENTIFIED BY 'nekosoft-root';"
+"${MYSQL_ADMIN[@]}" -e "ALTER USER 'admin'@'localhost' IDENTIFIED BY 'nekosoft-root';"
+"${MYSQL_ADMIN[@]}" -e "GRANT ALL PRIVILEGES ON *.* TO 'admin'@'localhost' WITH GRANT OPTION;"
+"${MYSQL_ADMIN[@]}" -e "FLUSH PRIVILEGES;"
+# Preuve que root + admin fonctionnent (échoue avec set -e si cassé).
+mysql --user=root -e "SELECT VERSION();" >/dev/null
+MYSQL_PWD='nekosoft-root' mysql --user=admin -e "SELECT 1;" >/dev/null
+echo "[@] MariaDB OK : root (unix_socket) + admin fonctionnels"
 
 
 # /var/www/html accessible au dev
