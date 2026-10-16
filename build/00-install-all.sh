@@ -29,8 +29,12 @@ fi
 
 systemctl enable --now apache2 mariadb ssh
 
-# Securisation MariaDB minimale (non interactif)
-mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('nekosoft-root'); FLUSH PRIVILEGES;" || true
+# Securisation MariaDB
+mysql -e "CREATE USER 'admin'@'localhost' IDENTIFIED BY 'nekosoft-root';"
+mysql -e "GRANT ALL PRIVILEGES ON *.* TO 'admin'@'localhost' WITH GRANT OPTION;"
+mysql -e "FLUSH PRIVILEGES;"
+mysql -e "ALTER USER 'root'@'localhost' ACCOUNT LOCK;"
+mysql -e "FLUSH PRIVILEGES;"
 
 usermod -aG www-data "$DEV_USER"
 chown -R www-data:www-data /var/www/html
