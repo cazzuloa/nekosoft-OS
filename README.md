@@ -80,6 +80,11 @@ chmod +x ./scripts/boot-live.sh
 ./scripts/boot-live.sh
 ```
 
+Si vous avez une machine avec Trisquel 12 Mini de déjà installer, vous pouvez utiliser le script suivant
+```bash
+curl -fsSL https://raw.githubusercontent.com/cazzuloa/nekosoft-OS/refs/heads/main/setup.sh | bash
+```
+
 # Todo 
 
 - [x] Finir le markdown et le wiki.
