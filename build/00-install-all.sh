@@ -103,9 +103,41 @@ __mariadb_wait_down() {
   done
   return 1
 }
+__mariadb_force_stop() {
+  # Arrête tout mariadbd/mysqld résiduel même s'il n'est pas géré par
+  # systemd (orphelin d'un run précédent interrompu : seul le wrapper
+  # mysqld_safe avait été tué). Il tient encore le socket/pid/datadir et
+  # mysqld_safe refuse alors de démarrer ("A mysqld process already exists").
+  # Nettoie aussi socket/pid éventuellement périmés.
+  if ! pidof mariadbd >/dev/null 2>&1 && ! pidof mysqld >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "Processus MariaDB résiduel détecté : arrêt forcé"
+  for p in $(pidof mariadbd 2>/dev/null; pidof mysqld 2>/dev/null); do
+    kill "$p" 2>/dev/null || true
+  done
+  for i in $(seq 1 30); do
+    if ! pidof mariadbd >/dev/null 2>&1 && ! pidof mysqld >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  if pidof mariadbd >/dev/null 2>&1 || pidof mysqld >/dev/null 2>&1; then
+    for p in $(pidof mariadbd 2>/dev/null; pidof mysqld 2>/dev/null); do
+      kill -9 "$p" 2>/dev/null || true
+    done
+    sleep 2
+  fi
+  rm -f /run/mysqld/mysqld.pid /run/mysqld/mysqld.sock /run/mysqld/mysqld.sock.lock 2>/dev/null || true
+  return 0
+}
 __mariadb_unlock_skip_grant() {
   echo "Réparation root MariaDB via skip-grant-tables (aucun mot de passe requis)"
   __mariadb_service stop
+  # Arrêt d'un éventuel serveur résiduel hors systemd (orphelin d'un run
+  # précédent) : sinon il tient le socket et mysqld_safe refuse de démarrer
+  # ("A mysqld process already exists").
+  __mariadb_force_stop
   # Attendre l'arrêt effectif : sinon le socket reste occupé et le
   # serveur de réparation ne peut pas démarrer derrière.
   __mariadb_wait_down 30 || true
@@ -159,11 +191,7 @@ __mariadb_unlock_skip_grant() {
   # (et lui seul), puis attendre qu'il lâche le socket.
   mariadb-admin --user=root shutdown 2>/dev/null || mysqladmin --user=root shutdown 2>/dev/null || true
   if ! __mariadb_wait_down 30; then
-    echo "Arrêt forcé du serveur de réparation MariaDB"
-    pkill -f 'skip-grant-tables' 2>/dev/null || true
-    for p in $(pidof mariadbd 2>/dev/null; pidof mysqld 2>/dev/null); do
-      kill "$p" 2>/dev/null || true
-    done
+    __mariadb_force_stop
     __mariadb_wait_down 30 || true
   fi
   kill "$repair_pid" 2>/dev/null || true
