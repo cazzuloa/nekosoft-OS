@@ -57,7 +57,7 @@ fi
 echo "[@] NekoSoft install - user dev: $DEV_USER"
 
 echo "[@] Mise à jour de la liste des paquets"
-apt update && apt upgrade
+apt update && apt upgrade -y
 
 # phpMyAdmin en non-interactif : pré-sélection debconf pour éviter le prompt
 # du choix du serveur web (apache2) et de dbconfig-common.
@@ -104,6 +104,9 @@ fi
 # On ne locke PLUS root : sur Ubuntu/Trisquel root est déjà en unix_socket
 # (connexion locale root-only, sans mot de passe réseau) : c'est sécurisé
 # ET ça garde mysqldump + phpmyadmin + relances fonctionnels.
+# Réparation d'une VM déjà cassée : niveau 3 ci-dessous. Piège documenté
+# dans __mariadb_unlock_skip_grant : FLUSH PRIVILEGES AVANT l'UNLOCK rejoue
+# le verrou et condamne la réparation (c'est le bug vu avec ERROR 4151).
 echo "[@] MariaDB sécur mini"
 echo "[@] Attente du démarrage de MariaDB"
 for i in $(seq 1 30); do
@@ -122,8 +125,10 @@ done
 # Niveau 1 : root unix_socket direct (cas nominal).
 # Niveau 2 : debian-sys-maint (si présent, répare un LOCK posé par l'ancien script).
 # Niveau 3 : redémarrage temporaire en skip-grant-tables (récupération root
-#             standard, sans aucun mot de passe : fonctionne même si
+#             sans aucun mot de passe : fonctionne même si
 #             /etc/mysql/debian.cnf n'existe pas, comme sur Trisquel Mini).
+#             Le déverrouillage se fait DIRECTEMENT dans les tables système
+#             (account_locked), jamais via FLUSH PRIVILEGES + ALTER USER.
 __mariadb_service() {
     # $1 = start|stop|restart
     if pidof systemd >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
@@ -146,10 +151,24 @@ __mariadb_wait_alive() {
         sleep 1
     done
 }
+__mariadb_wait_down() {
+    # $1 = tentatives max (défaut 30) ; vrai dès que le serveur ne répond plus.
+    local n="${1:-30}"
+    for i in $(seq 1 "$n"); do
+        if ! (mariadb-admin ping --silent 2>/dev/null \
+            || mysqladmin ping --silent 2>/dev/null); then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
 __mariadb_unlock_skip_grant() {
     echo "[@] Réparation root MariaDB via skip-grant-tables (aucun mot de passe requis)"
     __mariadb_service stop
-    sleep 3
+    # Attendre l'arrêt effectif : sinon le socket reste occupé et le
+    # serveur de réparation ne peut pas démarrer derrière.
+    __mariadb_wait_down 30 || true
     mkdir -p /run/mysqld || true
     chown mysql:mysql /run/mysqld 2>/dev/null || chown mysql /run/mysqld 2>/dev/null || true
     REPAIR_LOG="/var/log/mariadb-repair.log"
@@ -169,20 +188,58 @@ __mariadb_unlock_skip_grant() {
         sleep 1
     done
     if [[ "$ok" -ne 1 ]]; then
-        echo "[ERREUR] Serveur de réparation MariaDB injoignable (voir $REPAIR_LOG)" >&2
+        echo "[ERREUR] Serveur de réparation MariaDB injoignable : arrêt du service échoué ou démarrage KO (voir $REPAIR_LOG)" >&2
         kill "$repair_pid" 2>/dev/null || true
         return 1
     fi
-    mysql --user=root -e "FLUSH PRIVILEGES;"
-    mysql --user=root -e "ALTER USER 'root'@'localhost' ACCOUNT UNLOCK;"
-    mysql --user=root -e "ALTER USER 'root'@'localhost' IDENTIFIED VIA unix_socket;"
-    mysql --user=root -e "FLUSH PRIVILEGES;"
-    mysqladmin --user=root shutdown || kill "$repair_pid" 2>/dev/null || true
+    # PIÈGE (cause du bug observé) : ne JAMAIS faire FLUSH PRIVILEGES ici.
+    # Le FLUSH réactive les contrôles d'accès AVANT que root soit déverrouillé ;
+    # le verrou posé par l'ancien script (ACCOUNT LOCK) rejette alors la session
+    # de réparation elle-même (ERROR 4151 "this account is locked") et le
+    # déverrouillage ne s'exécute JAMAIS. Sous skip-grant-tables, on lève donc
+    # le verrou DIRECTEMENT dans les tables système, sans réactiver les ACL :
+    # le serveur de réparation les ignore, et le redémarrage normal relira les
+    # tables corrigées.
+    local unlock_sql
+    if [[ -n "$(mysql --user=root -N -B -e "SELECT 1 FROM information_schema.tables WHERE table_schema='mysql' AND table_name='global_priv' LIMIT 1;" 2>/dev/null)" ]]; then
+        # MariaDB >= 10.4 : le verrou est la clé account_locked du JSON
+        # mysql.global_priv (mysql.user n'est plus qu'une vue en lecture).
+        unlock_sql="UPDATE mysql.global_priv SET Priv = JSON_REMOVE(Priv, '\$.account_locked') WHERE User='root' AND Host='localhost';"
+    else
+        # Ancienne MariaDB (mysql.user = vraie table) : colonne account_locked.
+        unlock_sql="UPDATE mysql.user SET account_locked='N' WHERE User='root' AND Host='localhost';"
+    fi
+    if ! mysql --user=root -e "$unlock_sql"; then
+        echo "[ERREUR] Déverrouillage de root MariaDB impossible (voir $REPAIR_LOG)" >&2
+        kill "$repair_pid" 2>/dev/null || true
+        return 1
+    fi
+    # Arrêt du serveur de réparation : les ACL sont restées désactivées,
+    # donc mysqladmin shutdown passe. Repli : tuer le serveur de réparation
+    # (et lui seul), puis attendre qu'il lâche le socket.
+    mariadb-admin --user=root shutdown 2>/dev/null || mysqladmin --user=root shutdown 2>/dev/null || true
+    if ! __mariadb_wait_down 30; then
+        echo "[@] Arrêt forcé du serveur de réparation MariaDB"
+        pkill -f 'skip-grant-tables' 2>/dev/null || true
+        for p in $(pidof mariadbd 2>/dev/null; pidof mysqld 2>/dev/null); do
+            kill "$p" 2>/dev/null || true
+        done
+        __mariadb_wait_down 30 || true
+    fi
+    kill "$repair_pid" 2>/dev/null || true
     wait "$repair_pid" 2>/dev/null || true
-    sleep 3
+    # Un arrêt forcé peut laisser socket/pid périmés : le service ne
+    # redémarrerait pas. Plus aucun serveur ne tourne à ce stade.
+    rm -f /run/mysqld/mysqld.sock /run/mysqld/mysqld.sock.lock /run/mysqld/mysqld.pid 2>/dev/null || true
     __mariadb_service start
     if ! __mariadb_wait_alive 30; then
         echo "[ERREUR] MariaDB ne redémarre pas après réparation" >&2
+        return 1
+    fi
+    # Vérifie que root (unix_socket) répond vraiment, sinon la suite du
+    # script échouerait avec un message moins clair.
+    if ! mysql --user=root -e "SELECT 1;" >/dev/null 2>&1; then
+        echo "[ERREUR] root MariaDB toujours verrouillé après réparation (voir $REPAIR_LOG)" >&2
         return 1
     fi
     return 0
