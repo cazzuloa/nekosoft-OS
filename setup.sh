@@ -1,31 +1,62 @@
 #!/bin/bash
-# Script d'installation pour NekoSoft basé sur Trisquel Mini 12.
-# Projet SAE 1.03
-# Tout droit réserver @cazzuloa | https://github.com/cazzuloa/nekosoft-OS
+# =============================================================================
+# NekoSoft - installation d'un poste de développement Web (Trisquel 12 Mini)
+# SAE 1.03 - @cazzuloa | https://github.com/cazzuloa/nekosoft-OS
+#
+# Options : NEKO_MODE=chroot|live   FORGEJO_VERSION=x.y.z   DEV_USER=nom
+#           NEKO_PHPINFO=1 (crée /var/www/html/info.php pour la démo)
+# =============================================================================
 
-set -euo pipefail
-# -x uniquement en debug : DEBUG=1 sudo -E bash setup.sh
-if [[ "${DEBUG:-0}" == "1" ]]; then
-    set -x
-fi
+set -Eeuo pipefail
+trap 'echo "[ERREUR] ligne $LINENO : $BASH_COMMAND" >&2' ERR
 
-if [[ -t 1 ]]; then
-    COLOR_INFO=$'\033[0;36m'
-    COLOR_RESET=$'\033[0m'
-else
-    COLOR_INFO=''
-    COLOR_RESET=''
-fi
+[[ "${DEBUG:-0}" == "1" ]] && set -x
 
-info() {
-    printf '%s%s%s\n' "$COLOR_INFO" "$*" "$COLOR_RESET"
+# ----------------------------- Paramètres ------------------------------------
+NEKO_MODE="${NEKO_MODE:-auto}"
+FORGEJO_VERSION="${FORGEJO_VERSION:-15.0.0}"   # 15.x = LTS (support jusqu'à juillet 2027). Mets la dernière 15.0.x.
+WALL_URL="https://raw.githubusercontent.com/cazzuloa/nekosoft-OS/main/wallpapers/nekosoft-wallpaper-1920x1080.png"
+WALL_DST="/usr/share/backgrounds/nekosoft-wallpaper.png"
+UBLOCK_ID="uBlock0@raymondhill.net"
+UBLOCK_AMO="https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi"
+UBLOCK_LOCAL="/usr/share/nekosoft/ublock-origin.xpi"
+STATE_DIR="/var/lib/nekosoft"
+CRED_FILE="/root/nekosoft-credentials.txt"
+SELF_INSTALLED="/usr/local/sbin/nekosoft-setup"
+BASHRC_BLOCK="/usr/share/nekosoft/bashrc.block"
+BASHRC_MARK="# --- NekoSoft ---"
+BACKUP_BASE="/var/backups/nekosoft"
+BORG_REPO="$BACKUP_BASE/borg"
+BORG_PASSFILE="/root/.borg-passphrase"
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
+SCRIPT_DIR="$(dirname "${SELF:-/root/x}")"
+MODE=""
+export DEBIAN_FRONTEND=noninteractive
+APT=(apt-get -y -o Dpkg::Options::=--force-confold)
+
+# ----------------------------- Outils ----------------------------------------
+if [[ -t 1 ]]; then C_INFO=$'\033[0;36m'; C_WARN=$'\033[0;33m'; C_OFF=$'\033[0m'
+else C_INFO=''; C_WARN=''; C_OFF=''; fi
+info() { printf '%s[@] %s%s\n' "$C_INFO" "$*" "$C_OFF"; }
+warn() { printf '%s[!] %s%s\n' "$C_WARN" "$*" "$C_OFF" >&2; }
+die()  { echo "[ERREUR] $*" >&2; exit 1; }
+
+rand() { openssl rand -hex 16; }
+
+require_root() {
+    [[ "$(id -u)" -eq 0 ]] || die "Lancer en root : sudo bash $0"
 }
 
-# Root requis : tout le script (apt, systemctl, mysql, /etc, /home/...) l'exige.
-if [[ "$(id -u)" -ne 0 ]]; then
-    echo "[ERREUR] Lancer en root : sudo bash $0" >&2
-    exit 1
-fi
+detect_mode() {
+    if [[ "$NEKO_MODE" == "auto" ]]; then
+        # systemd actif (PID 1) => machine réelle ; sinon => chroot Cubic
+        if [[ -d /run/systemd/system ]]; then MODE="live"; else MODE="chroot"; fi
+    else
+        MODE="$NEKO_MODE"
+    fi
+    [[ "$MODE" == "live" || "$MODE" == "chroot" ]] || die "NEKO_MODE invalide : $MODE"
+}
 
 function __banner() {
     clear || true
@@ -46,410 +77,201 @@ function __banner() {
     printf "%s\n\n" "(c) Copyright github.com/cazzuloa"
 }
 
-__banner
+# ============================================================================
+# ÉTAPE 1 : INSTALLATION STATIQUE (chroot ET live)
+# ============================================================================
 
-export DEBIAN_FRONTEND=noninteractive
-# Utilisateur dev réel : SUDO_USER en priorité (sudo bash setup.sh),
-# sinon logname, sinon premier utilisateur avec un /home/*.
-# On valide qu'il existe, sinon usermod/chown planteraient plus loin.
-if [[ -z "${DEV_USER:-}" ]]; then
-    DEV_USER="${SUDO_USER:-}"
-fi
-if [[ -z "${DEV_USER:-}" ]]; then
-    DEV_USER="$(logname 2>/dev/null || true)"
-fi
-if [[ -z "${DEV_USER:-}" ]]; then
-    DEV_USER="$(ls -1 /home 2>/dev/null | head -n1 || true)"
-fi
-if [[ -z "${DEV_USER:-}" ]] || ! id "$DEV_USER" >/dev/null 2>&1; then
-    echo "[ERREUR] Utilisateur dev introuvable (DEV_USER vide ou inexistant)." >&2
-    echo "         Lance avec : sudo DEV_USER=test bash $0" >&2
-    exit 1
-fi
-info "[@] NekoSoft install - user dev: $DEV_USER"
-
-info "[@] Mise à jour de la liste des paquets"
-apt update && apt upgrade -y
-
-# phpMyAdmin en non-interactif : pré-sélection debconf pour éviter le prompt
-# du choix du serveur web (apache2) et de dbconfig-common.
-info "[@] Pré-configuration phpMyAdmin (debconf non-interactif)"
-echo "phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2" | debconf-set-selections || true
-echo "phpmyadmin phpmyadmin/dbconfig-install boolean true" | debconf-set-selections || true
-
-info "[@] Installation des paquets necessaire"
-apt install -y \
-    apache2 mariadb-server \
-    php libapache2-mod-php php-mysql php-cli php-mbstring php-zip php-gd php-curl \
-    phpmyadmin \
-    geany geany-plugins \
-    abrowser abrowser-locale-fr \
-    openssh-server \
-    borgbackup gnupg \
-    lightdm-gtk-greeter-settings \
-    wget curl unzip
-
-# phpMyAdmin : config auto apache
-info "[@] phpMyAdmin : config auto apache"
-if [ ! -e /etc/apache2/conf-enabled/phpmyadmin.conf ] && [ -e /etc/phpmyadmin/apache.conf ]; then
-    ln -s /etc/phpmyadmin/apache.conf /etc/apache2/conf-available/phpmyadmin.conf
-    a2enconf phpmyadmin
-fi
-
-# Services
-info "[@] Activation des services apache2, mariadb et ssh"
-if pidof systemd >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
-    systemctl enable --now apache2 mariadb ssh
-else
-    # Conteneur / live sans systemd : démarre au mieux, sans faire échouer le deploy.
-    service mariadb start || service mysql start || true
-    service apache2 start || true
-    service ssh start || true
-fi
-
-# MariaDB sécur mini (idempotent : relançable sans planter).
-# Contexte du bug : l'ancien script faisait
-#   ALTER USER 'root'@'localhost' ACCOUNT LOCK;
-# Au 2e lancement, 'mysql -e ...' en root via unix_socket échouait avec
-#   ERROR 4151 (HY000): Access denied, this account is locked
-# et 'set -e' stoppait tout le déploiement (Forgejo, Borg, fond d'écran...).
-# On ne locke PLUS root : sur Ubuntu/Trisquel root est déjà en unix_socket
-# (connexion locale root-only, sans mot de passe réseau) : c'est sécurisé
-# ET ça garde mysqldump + phpmyadmin + relances fonctionnels.
-info "[@] MariaDB sécur mini"
-info "[@] Attente du démarrage de MariaDB"
-for i in $(seq 1 30); do
-    if mariadb-admin --user=root ping --silent 2>/dev/null \
-        || mysqladmin --user=root ping --silent 2>/dev/null; then
-        break
+prepare_apt() {
+    if [[ "$MODE" == "chroot" ]]; then
+        # Interdit le démarrage des services pendant les postinst (pas de systemd en chroot)
+        printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d
+        chmod 755 /usr/sbin/policy-rc.d
     fi
-    if [[ "$i" -eq 30 ]]; then
-        echo "[ERREUR] MariaDB ne répond pas après 30s (mariadb-admin ping)" >&2
-        exit 1
-    fi
-    sleep 1
-done
 
-# Helper : exécute SQL en root via unix_socket, avec réparation auto si locké.
-# Niveau 1 : root unix_socket direct (cas nominal).
-# Niveau 2 : debian-sys-maint (si présent, répare un LOCK posé par l'ancien script).
-# Niveau 3 : redémarrage temporaire en skip-grant-tables (récupération root
-#             sans aucun mot de passe : fonctionne même si
-#             /etc/mysql/debian.cnf n'existe pas, comme sur Trisquel Mini).
-#             Le déverrouillage se fait DIRECTEMENT dans les tables système
-#             (account_locked), jamais via FLUSH PRIVILEGES + ALTER USER.
-__mariadb_service() {
-    # $1 = start|stop|restart
-    if pidof systemd >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
-        systemctl "$1" mariadb 2>/dev/null || systemctl "$1" mysql 2>/dev/null || true
-    else
-        service mariadb "$1" 2>/dev/null || service mysql "$1" 2>/dev/null || true
-    fi
+    info "Mise à jour des paquets"
+    "${APT[@]}" update
+    "${APT[@]}" upgrade
+
+    # phpMyAdmin : sélection debconf non interactive.
+    # dbconfig désactivé : il exigerait un MariaDB démarré (impossible en chroot).
+    # phpMyAdmin fonctionne pour la connexion ; seules les "tables liées" avancées manquent.
+    echo "phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2" | debconf-set-selections
+    echo "phpmyadmin phpmyadmin/dbconfig-install boolean false"            | debconf-set-selections
 }
-__mariadb_wait_alive() {
-    # $1 = tentatives max (défaut 30)
-    local n="${1:-30}"
-    for i in $(seq 1 "$n"); do
-        if mariadb-admin ping --silent 2>/dev/null \
-            || mysqladmin ping --silent 2>/dev/null; then
-            return 0
-        fi
-        if [[ "$i" -eq "$n" ]]; then
-            return 1
-        fi
-        sleep 1
-    done
+
+install_packages() {
+    info "Installation des paquets"
+    "${APT[@]}" install \
+        apache2 mariadb-server \
+        php libapache2-mod-php php-mysql php-cli php-mbstring php-zip php-gd php-curl php-xml \
+        phpmyadmin \
+        geany geany-plugins \
+        abrowser abrowser-locale-fr \
+        git borgbackup openssl ca-certificates acl \
+        locales curl wget unzip \
+        lightdm-gtk-greeter-settings
 }
-__mariadb_wait_down() {
-    # $1 = tentatives max (défaut 30) ; vrai dès que le serveur ne répond plus.
-    local n="${1:-30}"
-    for i in $(seq 1 "$n"); do
-        if ! (mariadb-admin ping --silent 2>/dev/null \
-            || mysqladmin ping --silent 2>/dev/null); then
-            return 0
-        fi
-        sleep 1
-    done
-    return 1
-}
-__mariadb_unlock_skip_grant() {
-    info "[@] Réparation root MariaDB via skip-grant-tables (aucun mot de passe requis)"
-    __mariadb_service stop
-    # Attendre l'arrêt effectif : sinon le socket reste occupé et le
-    # serveur de réparation ne peut pas démarrer derrière.
-    __mariadb_wait_down 30 || true
-    mkdir -p /run/mysqld || true
-    chown mysql:mysql /run/mysqld 2>/dev/null || chown mysql /run/mysqld 2>/dev/null || true
-    REPAIR_LOG="/var/log/mariadb-repair.log"
-    touch "$REPAIR_LOG" 2>/dev/null || REPAIR_LOG="/tmp/mariadb-repair.log"
-    if command -v mysqld_safe >/dev/null 2>&1; then
-        mysqld_safe --skip-grant-tables --skip-networking >>"$REPAIR_LOG" 2>&1 &
-    else
-        mariadbd-safe --skip-grant-tables --skip-networking >>"$REPAIR_LOG" 2>&1 &
+
+configure_apache() {
+    info "Configuration d'Apache et de phpMyAdmin"
+    a2enmod rewrite >/dev/null
+
+    if [[ -e /etc/phpmyadmin/apache.conf ]]; then
+        ln -sf /etc/phpmyadmin/apache.conf /etc/apache2/conf-available/phpmyadmin.conf
+        a2enconf phpmyadmin >/dev/null
     fi
-    local repair_pid=$!
-    local ok=0
-    for i in $(seq 1 30); do
-        if mysql --user=root -e "SELECT 1;" >/dev/null 2>&1; then
-            ok=1
-            break
-        fi
-        sleep 1
-    done
-    if [[ "$ok" -ne 1 ]]; then
-        echo "[ERREUR] Serveur de réparation MariaDB injoignable : arrêt du service échoué ou démarrage KO (voir $REPAIR_LOG)" >&2
-        kill "$repair_pid" 2>/dev/null || true
-        return 1
-    fi
-    # PIÈGE (cause du bug observé) : ne JAMAIS faire FLUSH PRIVILEGES ici.
-    # Le FLUSH réactive les contrôles d'accès AVANT que root soit déverrouillé ;
-    # le verrou posé par l'ancien script (ACCOUNT LOCK) rejette alors la session
-    # de réparation elle-même (ERROR 4151 "this account is locked") et le
-    # déverrouillage ne s'exécute JAMAIS. Sous skip-grant-tables, on lève donc
-    # le verrou DIRECTEMENT dans les tables système, sans réactiver les ACL :
-    # le serveur de réparation les ignore, et le redémarrage normal relira les
-    # tables corrigées.
-    local unlock_sql
-    if [[ -n "$(mysql --user=root -N -B -e "SELECT 1 FROM information_schema.tables WHERE table_schema='mysql' AND table_name='global_priv' LIMIT 1;" 2>/dev/null)" ]]; then
-        # MariaDB >= 10.4 : le verrou est la clé account_locked du JSON
-        # mysql.global_priv (mysql.user n'est plus qu'une vue en lecture).
-        unlock_sql="UPDATE mysql.global_priv SET Priv = JSON_REMOVE(Priv, '\$.account_locked') WHERE User='root' AND Host='localhost';"
-    else
-        # Ancienne MariaDB (mysql.user = vraie table) : colonne account_locked.
-        unlock_sql="UPDATE mysql.user SET account_locked='N' WHERE User='root' AND Host='localhost';"
-    fi
-    if ! mysql --user=root -e "$unlock_sql"; then
-        echo "[ERREUR] Déverrouillage de root MariaDB impossible (voir $REPAIR_LOG)" >&2
-        kill "$repair_pid" 2>/dev/null || true
-        return 1
-    fi
-    # Arrêt du serveur de réparation : les ACL sont restées désactivées,
-    # donc mysqladmin shutdown passe. Repli : tuer le serveur de réparation
-    # (et lui seul), puis attendre qu'il lâche le socket.
-    mariadb-admin --user=root shutdown 2>/dev/null || mysqladmin --user=root shutdown 2>/dev/null || true
-    if ! __mariadb_wait_down 30; then
-        info "[@] Arrêt forcé du serveur de réparation MariaDB"
-        pkill -f 'skip-grant-tables' 2>/dev/null || true
-        for p in $(pidof mariadbd 2>/dev/null; pidof mysqld 2>/dev/null); do
-            kill "$p" 2>/dev/null || true
-        done
-        __mariadb_wait_down 30 || true
-    fi
-    kill "$repair_pid" 2>/dev/null || true
-    wait "$repair_pid" 2>/dev/null || true
-    # Un arrêt forcé peut laisser socket/pid périmés : le service ne
-    # redémarrerait pas. Plus aucun serveur ne tourne à ce stade.
-    rm -f /run/mysqld/mysqld.sock /run/mysqld/mysqld.sock.lock /run/mysqld/mysqld.pid 2>/dev/null || true
-    __mariadb_service start
-    if ! __mariadb_wait_alive 30; then
-        echo "[ERREUR] MariaDB ne redémarre pas après réparation" >&2
-        return 1
-    fi
-    # Vérifie que root (unix_socket) répond vraiment, sinon la suite du
-    # script échouerait avec un message moins clair.
-    if ! mysql --user=root -e "SELECT 1;" >/dev/null 2>&1; then
-        echo "[ERREUR] root MariaDB toujours verrouillé après réparation (voir $REPAIR_LOG)" >&2
-        return 1
-    fi
-    return 0
-}
-# Canal SQL privilégié : tableau MYSQL_ADMIN.
-MYSQL_ADMIN=()
-if mysql --user=root -e "SELECT 1;" >/dev/null 2>&1; then
-    MYSQL_ADMIN=(mysql --user=root)
-elif [[ -f /etc/mysql/debian.cnf ]] && mysql --defaults-file=/etc/mysql/debian.cnf -e "SELECT 1;" >/dev/null 2>&1; then
-    info "[@] root MariaDB verrouillé par un ancien run : réparation via debian-sys-maint"
-    MYSQL_ADMIN=(mysql --defaults-file=/etc/mysql/debian.cnf)
-else
-    if ! __mariadb_unlock_skip_grant; then
-        exit 1
-    fi
-    MYSQL_ADMIN=(mysql --user=root)
-fi
-# Répare un éventuel LOCK posé par l'ancien script, puis sécurise sans locker.
-"${MYSQL_ADMIN[@]}" -e "ALTER USER 'root'@'localhost' ACCOUNT UNLOCK;"
-"${MYSQL_ADMIN[@]}" -e "ALTER USER 'root'@'localhost' IDENTIFIED VIA unix_socket;"
-"${MYSQL_ADMIN[@]}" -e "DELETE FROM mysql.user WHERE User='';"
-"${MYSQL_ADMIN[@]}" -e "DROP DATABASE IF EXISTS test;"
-"${MYSQL_ADMIN[@]}" -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
-# Admin applicatif : IF NOT EXISTS + ALTER => mot de passe à jour à chaque run.
-"${MYSQL_ADMIN[@]}" -e "CREATE USER IF NOT EXISTS 'admin'@'localhost' IDENTIFIED BY 'nekosoft-root';"
-"${MYSQL_ADMIN[@]}" -e "ALTER USER 'admin'@'localhost' IDENTIFIED BY 'nekosoft-root';"
-"${MYSQL_ADMIN[@]}" -e "GRANT ALL PRIVILEGES ON *.* TO 'admin'@'localhost' WITH GRANT OPTION;"
-"${MYSQL_ADMIN[@]}" -e "FLUSH PRIVILEGES;"
-# Preuve que root + admin fonctionnent (échoue avec set -e si cassé).
-mysql --user=root -e "SELECT VERSION();" >/dev/null
-MYSQL_PWD='nekosoft-root' mysql --user=admin -e "SELECT 1;" >/dev/null
-info "[@] MariaDB OK : root (unix_socket) + admin fonctionnels"
 
-
-# /var/www/html accessible au dev
-info "[@] Configuration des droits d'accès de $DEV_USER à /var/www/html via le groupe www-data"
-usermod -aG www-data "$DEV_USER"
-chown -R www-data:www-data /var/www/html
-chmod -R 775 /var/www/html
-# sticky dev : nouveaux fichiers héritent du groupe
-chmod g+s /var/www/html
-
-# Test PHP
-info "[@] Création de la page de test PHP dans /var/www/html"
-echo "<?php phpinfo(); ?>" > /var/www/html/info.php
-chown www-data:www-data /var/www/html/info.php
-
-# Version PHP
-info "[@] Version de PHP :"
-php -r 'echo PHP_VERSION, PHP_EOL;'
-
-info "[@] -----------------------------------------"
-info "[@] Installation de Forgejo"
-FORGEJO_VERSION="12.0.3"
-BIN_URL="https://codeberg.org/forgejo/forgejo/releases/download/v${FORGEJO_VERSION}/forgejo-${FORGEJO_VERSION}-linux-amd64"
-
-info "[@] Création de l'utilisateur système git"
-id git 2>/dev/null || adduser --system --shell /bin/bash --gecos 'Git Version Control' --group --disabled-password --home /home/git git
-
-info "[@] Préparation des répertoires et des permissions de Forgejo"
-mkdir -p /var/lib/forgejo /etc/forgejo /var/log/forgejo
-chown git:git /var/lib/forgejo /var/log/forgejo
-chmod 750 /var/lib/forgejo
-
-info "[@] Téléchargement de Forgejo ${FORGEJO_VERSION}"
-wget -O /usr/local/bin/forgejo "$BIN_URL"
-chmod +x /usr/local/bin/forgejo
-
-# config minimale : sqlite (zéro dépendance, parfait pour poste dev), port 3000
-info "[@] Création de la configuration Forgejo (SQLite, port 3000)"
-cat > /etc/forgejo/app.ini <<'EOF'
-[server]
-DOMAIN           = localhost
-HTTP_PORT        = 3000
-ROOT_URL         = http://localhost:3000/
-DISABLE_SSH      = false
-SSH_PORT         = 22
-
-[database]
-DB_TYPE          = sqlite3
-PATH             = /var/lib/forgejo/forgejo.db
-
-[repository]
-ROOT             = /home/git/repositories
-
-[service]
-DISABLE_REGISTRATION = false
-
-[picture]
-DISABLE_GRAVATAR = false
+    # phpMyAdmin accessible uniquement depuis la machine elle-même
+    cat > /etc/apache2/conf-available/zz-nekosoft-phpmyadmin-local.conf <<'EOF'
+<Directory /usr/share/phpmyadmin>
+    Require local
+</Directory>
 EOF
-chown git:git /etc/forgejo/app.ini
-chmod 640 /etc/forgejo/app.ini
+    a2enconf zz-nekosoft-phpmyadmin-local >/dev/null
 
-info "[@] Création du service systemd Forgejo"
-cat > /etc/systemd/system/forgejo.service <<'EOF'
+    systemctl enable apache2 mariadb >/dev/null 2>&1 || true
+}
+
+configure_webroot() {
+    info "Droits sur /var/www/html (groupe www-data + ACL par défaut)"
+    chown -R www-data:www-data /var/www/html
+    find /var/www/html -type d -exec chmod 2775 {} +
+    find /var/www/html -type f -exec chmod 664 {} +
+    # ACL : tout nouveau fichier créé par un membre de www-data reste lisible/écrivable par le groupe
+    setfacl -R    -m g:www-data:rwX /var/www/html
+    setfacl -R -d -m g:www-data:rwX /var/www/html
+
+    if [[ "${NEKO_PHPINFO:-0}" == "1" ]]; then
+        echo "<?php phpinfo(); ?>" > /var/www/html/info.php
+        chown www-data:www-data /var/www/html/info.php
+        warn "info.php créé : à supprimer après la démo"
+    fi
+}
+
+install_forgejo() {
+    info "Installation de Forgejo ${FORGEJO_VERSION}"
+    [[ "$(uname -m)" == "x86_64" ]] || die "Binaire Forgejo prévu pour x86_64 uniquement"
+
+    id git >/dev/null 2>&1 || adduser --system --shell /bin/bash --gecos 'Git Version Control' \
+        --group --disabled-password --home /home/git git
+
+    mkdir -p /var/lib/forgejo /var/log/forgejo /etc/forgejo
+    chown git:git /var/lib/forgejo /var/log/forgejo
+    chmod 750 /var/lib/forgejo
+    chown root:git /etc/forgejo
+    chmod 770 /etc/forgejo
+
+    local v="$FORGEJO_VERSION"
+    local url="https://codeberg.org/forgejo/forgejo/releases/download/v${v}/forgejo-${v}-linux-amd64"
+    local tmp; tmp="$(mktemp -d)"
+
+    if [[ -x /usr/local/bin/forgejo ]] && /usr/local/bin/forgejo --version 2>/dev/null | grep -q "version ${v}"; then
+        info "Forgejo ${v} déjà présent"
+    else
+        curl -fL --retry 3 -o "$tmp/forgejo"        "$url"
+        curl -fL --retry 3 -o "$tmp/forgejo.sha256" "$url.sha256"
+        local expected; expected="$(awk '{print $1}' "$tmp/forgejo.sha256")"
+        echo "$expected  $tmp/forgejo" | sha256sum -c -   # abandonne si le hash ne correspond pas
+        systemctl stop forgejo 2>/dev/null || true
+        install -m 755 "$tmp/forgejo" /usr/local/bin/forgejo
+    fi
+    rm -rf "$tmp"
+
+    # Le service n'est lancé que si /etc/forgejo/app.ini existe (créé au 1er démarrage)
+    cat > /etc/systemd/system/forgejo.service <<'EOF'
 [Unit]
-Description=NekoSoft Forgejo (Gitea fork)
-After=network.target mariadb.service
+Description=NekoSoft Forgejo (forge logicielle)
+After=network.target
+ConditionPathExists=/etc/forgejo/app.ini
 
 [Service]
 User=git
 Group=git
 Type=simple
+WorkingDirectory=/var/lib/forgejo
 ExecStart=/usr/local/bin/forgejo web --config /etc/forgejo/app.ini
 Restart=always
-Environment=USER=git HOME=/home/git
+RestartSec=2s
+Environment=USER=git HOME=/home/git FORGEJO_WORK_DIR=/var/lib/forgejo
 
 [Install]
 WantedBy=multi-user.target
 EOF
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable forgejo >/dev/null 2>&1 || true
+}
 
-info "[@] Activation et démarrage du service Forgejo"
-systemctl daemon-reload
-systemctl enable --now forgejo
+install_backup_tools() {
+    info "Installation du script et du timer de sauvegarde Borg"
 
-info "[@] Forgejo installé : http://localhost:3000 (1er compte = admin)"
-systemctl status forgejo --no-pager | head -15
-
-
-info "[@] Préparation des sauvegardes Borg"
-# DEV_USER déjà validé en tête de script : ne pas le réécraser (logname échoue en root).
-REPO="/var/backups/nekosoft-borg"
-PASSPHRASE_FILE="/root/.borg-passphrase"
-
-info "[@] Création du répertoire de sauvegarde"
-mkdir -p /var/backups
-chmod 700 /var/backups
-
-# mot de passe généré une fois, conservé root-only (à justifier : clef hors poste en prod)
-if [ ! -f "$PASSPHRASE_FILE" ]; then
-    info "[@] Génération de la passphrase Borg"
-    openssl rand -base64 32 > "$PASSPHRASE_FILE"
-    chmod 600 "$PASSPHRASE_FILE"
-    echo "Passphrase générée dans $PASSPHRASE_FILE"
-fi
-export BORG_PASSPHRASE="$(cat "$PASSPHRASE_FILE")"
-
-# init repo chiffré repokey-blake2 si nouveau
-if [ ! -d "$REPO" ]; then
-    info "[@] Initialisation du dépôt Borg chiffré"
-    borg init --encryption=repokey-blake2 "$REPO"
-fi
-
-# script de sauvegarde quotidien
-info "[@] Création du script de sauvegarde quotidien"
-cat > /usr/local/bin/nekosoft-backup.sh <<'EOF'
+    cat > /usr/local/bin/nekosoft-backup.sh <<'EOF'
 #!/bin/bash
-set -eu
+# Sauvegarde chiffrée (Borg repokey-blake2) : web, bases SQL, Forgejo, /home, config
+set -euo pipefail
 export BORG_PASSPHRASE="$(cat /root/.borg-passphrase)"
-REPO="/var/backups/nekosoft-borg"
-# dump SQL avant borg (root via unix_socket : fonctionne car on ne locke plus root)
-mariadb-dump --user=root --all-databases 2>/dev/null | gzip > /var/backups/all-databases.sql.gz || mysqldump --user=root --all-databases 2>/dev/null | gzip > /var/backups/all-databases.sql.gz || true
+BASE=/var/backups/nekosoft
+REPO="$BASE/borg"
+STAGE="$BASE/staging"
+mkdir -p "$STAGE"; chmod 700 "$BASE" "$STAGE"
+
+# 1) Dump SQL (root via unix_socket). pipefail => une erreur de dump fait échouer la sauvegarde
+if command -v mariadb-dump >/dev/null; then DUMP=mariadb-dump; else DUMP=mysqldump; fi
+"$DUMP" --user=root --all-databases --single-transaction | gzip > "$STAGE/all-databases.sql.gz"
+
+# 2) Base SQLite de Forgejo : copie cohérente (arrêt de quelques secondes)
+if [[ -f /var/lib/forgejo/forgejo.db ]]; then
+    was_active=0
+    systemctl is-active --quiet forgejo && was_active=1
+    [[ $was_active -eq 1 ]] && systemctl stop forgejo
+    cp -a /var/lib/forgejo/forgejo.db "$STAGE/" || echo "[!] copie forgejo.db échouée" >&2
+    [[ $was_active -eq 1 ]] && systemctl start forgejo
+fi
+
+# 3) Archive chiffrée
 borg create --stats --compression lz4 \
-    "$REPO::{now:%Y-%m-%d_%H:%M}" \
-    /var/www/html \
-    /var/backups/all-databases.sql.gz \
-    /home \
-    /etc/forgejo /etc/apache2 \
-    --exclude '/home/*/.cache'
-# rétention : 7 jours, 4 semaines, 6 mois
-borg prune -v --list "$REPO" --keep-daily=7 --keep-weekly=4 --keep-monthly=6
+    --exclude '/home/*/.cache' \
+    --exclude '/var/lib/forgejo/forgejo.db*' \
+    "$REPO::{hostname}-{now:%Y-%m-%d_%H:%M}" \
+    /var/www/html "$STAGE" /home /etc/forgejo /etc/apache2 /var/lib/forgejo
+
+# 4) Rétention : 7 jours, 4 semaines, 6 mois
+borg prune --list "$REPO" --keep-daily=7 --keep-weekly=4 --keep-monthly=6
 borg compact "$REPO"
 EOF
-chmod +x /usr/local/bin/nekosoft-backup.sh
+    chmod 755 /usr/local/bin/nekosoft-backup.sh
 
-# 1ère sauvegarde immédiate (preuve démo)
-info "[@] Exécution de la première sauvegarde Borg"
-BORG_PASSPHRASE="$(cat "$PASSPHRASE_FILE")" /usr/local/bin/nekosoft-backup.sh || true
-borg list "$REPO" || true
+    cat > /etc/systemd/system/nekosoft-backup.service <<'EOF'
+[Unit]
+Description=NekoSoft - sauvegarde Borg chiffrée
+ConditionPathExists=/var/backups/nekosoft/borg
 
-# cron quotidien 2h
-info "[@] Planification de la sauvegarde quotidienne à 2 h"
-echo "0 2 * * * root /usr/local/bin/nekosoft-backup.sh >> /var/log/nekosoft-backup.log 2>&1" > /etc/cron.d/nekosoft-backup
-chmod 644 /etc/cron.d/nekosoft-backup
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/nekosoft-backup.sh
+EOF
 
-info "[@] Sauvegardes Borg configurées. Vérification : borg list $REPO"
-info "[@] Pour la soutenance : borg info $REPO montre le chiffrement repokey"
+    # Timer (et pas cron à 2h) : les portables sont éteints la nuit => Persistent rattrape au prochain démarrage
+    cat > /etc/systemd/system/nekosoft-backup.timer <<'EOF'
+[Unit]
+Description=NekoSoft - sauvegarde quotidienne
 
-info "[@] Configuration du fond d'écran NekoSoft"
-WALL_URL="https://raw.githubusercontent.com/cazzuloa/nekosoft-OS/main/wallpapers/nekosoft-wallpaper-1920x1080.png"
-WALL_DST="/usr/share/backgrounds/nekosoft-wallpaper.png"
-# DEV_USER déjà validé en tête de script.
+[Timer]
+OnCalendar=*-*-* 12:30:00
+Persistent=true
+RandomizedDelaySec=20min
 
-# 1. Installer le fond système
-info "[@] Téléchargement et installation du fond d'écran système"
-mkdir -p /usr/share/backgrounds
-if ! wget -O "$WALL_DST" "$WALL_URL"; then
-    echo "[ATTENTION] Fond d'écran non téléchargé (hors-ligne ?) : suite sans wallpaper" >&2
-    WALL_DST=""
-fi
-if [[ -n "$WALL_DST" ]]; then
-chmod 644 "$WALL_DST"
-fi
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable nekosoft-backup.timer >/dev/null 2>&1 || true
+}
 
-# 2. Config PCManFM (gestionnaire bureau LXDE) pour l'utilisateur actuel
-# La session Trisquel-mini lit le profil "Trisquel-mini", pas "default".
-# On fournit donc TOUS les profils : le bon est toujours trouvé.
-info "[@] Configuration du fond d'écran dans les profils PCManFM de $DEV_USER"
-mkdir -p "/home/$DEV_USER/.config/pcmanfm/default"
-cat > "/home/$DEV_USER/.config/pcmanfm/default/desktop-items-0.conf" <<EOF
+# ----------------------------- Personnalisation visuelle ---------------------
+
+write_pcmanfm_conf() {   # $1 = fichier de destination
+    mkdir -p "$(dirname "$1")"
+    cat > "$1" <<EOF
 [*]
 wallpaper_mode=stretch
 wallpaper_common=1
@@ -463,267 +285,386 @@ show_documents=0
 show_trash=1
 show_mounts=1
 EOF
-for p in lxde LXDE Trisquel-mini trisquel-mini; do
-    mkdir -p "/home/$DEV_USER/.config/pcmanfm/$p"
-    cp "/home/$DEV_USER/.config/pcmanfm/default/desktop-items-0.conf" "/home/$DEV_USER/.config/pcmanfm/$p/desktop-items-0.conf"
-done
-chown -R "$DEV_USER:$DEV_USER" "/home/$DEV_USER/.config"
+}
 
-# Helper robuste : réécrit tous les profils + applique en live.
-# (Évite le "sh -c ..." fragile dans le .desktop et le --wallpaper-mode=fill invalide :
-#  pcmanfm CLI n'accepte que color|stretch|fit|center|tile.)
-info "[@] Installation du script d'application du fond d'écran"
-cat > /usr/local/bin/nekosoft-wallpaper.sh <<SCRIPTEOF
-#!/bin/bash
-WALL=$WALL_DST
-[ -f "\$WALL" ] || exit 0
-for p in Trisquel-mini trisquel-mini LXDE lxde default; do
-    D="\$HOME/.config/pcmanfm/\$p"
-    mkdir -p "\$D"
-    cat > "\$D/desktop-items-0.conf" <<CONF
-[*]
-wallpaper_mode=stretch
-wallpaper_common=1
-wallpaper=\$WALL
-desktop_bg=#1E1B2E
-desktop_fg=#FFFFFF
-desktop_shadow=#000000
-show_wm_menu=0
-sort=mtime;ascending;
-show_documents=0
-show_trash=1
-show_mounts=1
-CONF
-done
-if [ -n "\${DISPLAY:-}" ] && command -v pcmanfm >/dev/null 2>&1; then
-    pcmanfm --set-wallpaper="\$WALL" --wallpaper-mode=stretch || true
-    pcmanfm --reconfigure || true
-fi
-exit 0
-SCRIPTEOF
-chmod 755 /usr/local/bin/nekosoft-wallpaper.sh
+install_wallpaper() {
+    info "Fond d'écran NekoSoft"
+    mkdir -p /usr/share/backgrounds
+    local local_file="$SCRIPT_DIR/nekosoft-wallpaper.png"
+    # En chroot Cubic : dépose nekosoft-wallpaper.png à côté du script => pas besoin d'Internet
+    if [[ -f "$local_file" ]]; then
+        install -m 644 "$local_file" "$WALL_DST"
+    elif wget -q -O "$WALL_DST" "$WALL_URL"; then
+        chmod 644 "$WALL_DST"
+    else
+        warn "Fond d'écran introuvable (ni fichier local, ni téléchargement) : étape ignorée"
+        rm -f "$WALL_DST"
+        return 0
+    fi
 
-# 3. Modèle /etc/skel pour tout futur utilisateur (\$HOME via /etc/skel)
-info "[@] Configuration du fond d'écran pour les futurs utilisateurs"
-for p in default lxde LXDE Trisquel-mini trisquel-mini; do
-    mkdir -p "/etc/skel/.config/pcmanfm/$p"
-    cp "/home/$DEV_USER/.config/pcmanfm/default/desktop-items-0.conf" "/etc/skel/.config/pcmanfm/$p/desktop-items-0.conf"
-done
-find /etc/skel/.config/pcmanfm -type d -exec chmod 755 {} \;
-find /etc/skel/.config/pcmanfm -type f -exec chmod 644 {} \;
-# Autostart XDG (backup) : Exec direct, pas de sh -c
-info "[@] Configuration du démarrage automatique du fond d'écran"
-cat > /etc/xdg/autostart/nekosoft-wallpaper.desktop <<EOF
-[Desktop Entry]
-Type=Application
-Name=NekoSoft Wallpaper
-Comment=Applique le fond d'ecran NekoSoft au demarrage de session
-Exec=/usr/local/bin/nekosoft-wallpaper.sh
-OnlyShowIn=LXDE;
-NoDisplay=true
-X-GNOME-Autostart-enabled=true
-X-LXDE-Autostart-enabled=true
-EOF
-chmod 644 /etc/xdg/autostart/nekosoft-wallpaper.desktop
-mkdir -p /etc/skel/.config/autostart
-cp /etc/xdg/autostart/nekosoft-wallpaper.desktop /etc/skel/.config/autostart/
-# Autostart natif lxsession (méthode fiable, lue avant pcmanfm --desktop)
-for S in LXDE Trisquel-mini; do
-    F="/etc/xdg/lxsession/$S/autostart"
-    [ -f "$F" ] || continue
-    grep -q "nekosoft-wallpaper" "$F" || echo "@/usr/local/bin/nekosoft-wallpaper.sh" >> "$F"
-done
+    # Le profil lu dépend de la session : on les fournit tous (modèle /etc/skel)
+    local p
+    for p in default lxde LXDE Trisquel-mini trisquel-mini; do
+        write_pcmanfm_conf "/etc/skel/.config/pcmanfm/$p/desktop-items-0.conf"
+    done
+    find /etc/skel/.config/pcmanfm -type d -exec chmod 755 {} +
+    find /etc/skel/.config/pcmanfm -type f -exec chmod 644 {} +
 
-# .bashrc NekoSoft + alias utiles dev (idempotent : pas de doublon si relancé)
-info "[@] Configuration du terminal NekoSoft et des alias développeur"
-if ! grep -q "NekoSoft" /etc/skel/.bashrc 2>/dev/null; then
-cat >> /etc/skel/.bashrc <<'EOF'
+    # Écran de connexion LightDM
+    local greeter=/etc/lightdm/lightdm-gtk-greeter.conf
+    if [[ -f "$greeter" ]]; then
+        grep -q '^\[greeter\]' "$greeter" || printf '\n[greeter]\n' >> "$greeter"
+        sed -i '/^background=/d' "$greeter"
+        sed -i "/^\[greeter\]/a background=$WALL_DST" "$greeter"
+    else
+        warn "$greeter absent : écran de connexion non modifié"
+    fi
+}
 
+install_bashrc_block() {
+    info "Terminal NekoSoft (PS1, couleurs, alias)"
+    mkdir -p /usr/share/nekosoft
+    cat > "$BASHRC_BLOCK" <<'EOF'
 # --- NekoSoft ---
 export PS1='\[\e[38;5;177m\]nekosoft🐾 \w \$ \[\e[0m\]'
-# Fix #4 : bleu fonce (di=01;34) illisible sur fond sombre -> dossiers en cyan clair
+# dossiers en cyan clair (le bleu foncé est illisible sur fond sombre)
 if [ -x /usr/bin/dircolors ]; then
-  eval "$(dircolors -b)"
+    eval "$(dircolors -b)"
 fi
 export LS_COLORS="di=01;36:${LS_COLORS//di=01;34/di=01;36}"
 alias ll='ls -lh --color'
 alias www='cd /var/www/html'
-alias logs='sudo journalctl -xeu apache2 -u mariadb -u forgejo'
+alias logs='sudo journalctl -xe -u apache2 -u mariadb -u forgejo'
 EOF
-fi
-cp /etc/skel/.bashrc "/home/$DEV_USER/.bashrc.nekosoft-add" || true
-# ajoute aussi à l'utilisateur actuel sans écraser
-grep -q "NekoSoft" "/home/$DEV_USER/.bashrc" || cat /etc/skel/.bashrc >> "/home/$DEV_USER/.bashrc" || true
-# Note: méthode propre = le bloc ci-dessus est déjà dans /etc/skel pour futurs users
+    grep -qF "$BASHRC_MARK" /etc/skel/.bashrc 2>/dev/null || { echo >> /etc/skel/.bashrc; cat "$BASHRC_BLOCK" >> /etc/skel/.bashrc; }
+}
 
-# Marque-page Geany + page d'accueil ABrowser via skel
-info "[@] Préparation de la configuration Geany"
-mkdir -p /etc/skel/.config/geany
-mkdir -p "/home/$DEV_USER/.config/geany"
+install_locale() {
+    info "Langue système : français"
+    locale-gen fr_FR.UTF-8
+    update-locale LANG=fr_FR.UTF-8 LANGUAGE=fr_FR:fr
+}
 
-# 4. Écran de login LightDM aux couleurs NekoSoft
-# Trisquel Mini : vrai fichier = /etc/lightdm/lightdm-gtk-greeter.conf (pas de .d/)
-# Idempotent : nettoie les anciens blocs ajoutés avant de réécrire (évite doublons [greeter])
-info "[@] Configuration de l'écran de connexion LightDM avec le fond NekoSoft"
-if [[ -f /etc/lightdm/lightdm-gtk-greeter.conf ]]; then
-python3 <<'PYEOF'
-import re
-p = "/etc/lightdm/lightdm-gtk-greeter.conf"
-t = open(p).read()
-t = re.sub(r"^\[greeter\]\nbackground=.*\n(?:theme-name=.*\n)?(?:icon-theme-name=.*\n)?(?:font-name=.*\n)?", "", t, flags=re.M)
-t = re.sub(r"\n{3,}", "\n\n", t)
-if "nekosoft-wallpaper" not in t:
-    t = t.rstrip() + "\n\n[greeter]\nbackground=/usr/share/backgrounds/nekosoft-wallpaper.png\ntheme-name=Adwaita-dark\nicon-theme-name=elementary\nfont-name=Cantarell 11\n"
-open(p, "w").write(t)
-PYEOF
-else
-    echo "[ATTENTION] /etc/lightdm/lightdm-gtk-greeter.conf absent (pas de LightDM ?) : étape ignorée" >&2
-fi
+install_abrowser() {
+    info "ABrowser : français, uBlock Origin, navigateur par défaut"
 
-# 5. Appliquer immédiatement si session LXDE active (ne casse rien sinon)
-info "[@] Application immédiate du fond d'écran et réparation des profils PCManFM"
-sudo -u "$DEV_USER" /usr/local/bin/nekosoft-wallpaper.sh || true
-# Répare aussi les profils existants de l'utilisateur actuel (cas Trisquel-mini)
-for p in lxde LXDE Trisquel-mini trisquel-mini; do
-    mkdir -p "/home/$DEV_USER/.config/pcmanfm/$p"
-    cp "/home/$DEV_USER/.config/pcmanfm/default/desktop-items-0.conf" "/home/$DEV_USER/.config/pcmanfm/$p/desktop-items-0.conf"
-done
-chown -R "$DEV_USER:$DEV_USER" "/home/$DEV_USER/.config"
+    # uBlock Origin embarqué dans l'image : fonctionne même hors-ligne au 1er lancement
+    local src="$UBLOCK_AMO"
+    mkdir -p /usr/share/nekosoft
+    if curl -fL --retry 3 -o "$UBLOCK_LOCAL" "$UBLOCK_AMO"; then
+        chmod 644 "$UBLOCK_LOCAL"
+        src="file://$UBLOCK_LOCAL"
+    else
+        warn "xpi uBlock non téléchargé : repli sur l'installation depuis addons.mozilla.org (Internet requis au 1er lancement)"
+    fi
 
-info "[@] Bureau NekoSoft configuré. Vérification possible avec un nouvel utilisateur :"
-echo "sudo adduser testnek && sudo -u testnek cat ~/.config/pcmanfm/default/desktop-items-0.conf"
-
-# 1. Forcer le français : ABrowser utilise les locales système + paquet abrowser-locale-fr
-# On impose fr dans /etc/default/locale (pris en compte au login)
-info "[@] Configuration du français comme langue système"
-update-locale LANG=fr_FR.UTF-8 LANGUAGE=fr_FR:fr LC_ALL=fr_FR.UTF-8 || true
-locale-gen fr_FR.UTF-8 || true
-
-# 2. uBlock Origin : installation forcée entreprise (ne peut pas être désactivée)
-# Doc Firefox Enterprise policies : ExtensionSettings + Extensions Install
-# ABrowser lit /usr/lib/abrowser/distribution/policies.json (comme Firefox)
-# On met aussi /etc/firefox/policies au cas où (ABrowser est un rebrand Firefox)
-info "[@] Configuration d'ABrowser et installation forcée de uBlock Origin"
-UBLOCK_URL="https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi"
-# ID officiel uBlock Origin :
-UBLOCK_ID="uBlock0@raymondhill.net"
-
-mkdir -p /usr/lib/abrowser/distribution /etc/firefox/policies
-for D in /usr/lib/abrowser/distribution /etc/firefox/policies; do
-cat > "$D/policies.json" <<EOF
+    local d
+    for d in /usr/lib/abrowser/distribution /etc/firefox/policies; do
+        mkdir -p "$d"
+        cat > "$d/policies.json" <<EOF
 {
   "policies": {
-    "LanguagePacks": ["fr"],
     "RequestedLocales": ["fr"],
     "DisableTelemetry": true,
-    "Extensions": {
-      "Install": ["$UBLOCK_URL"]
-    },
+    "DontCheckDefaultBrowser": true,
     "ExtensionSettings": {
       "$UBLOCK_ID": {
         "installation_mode": "force_installed",
-        "install_url": "$UBLOCK_URL"
+        "install_url": "$src"
       }
     }
   }
 }
 EOF
-done
+    done
 
-# 3. Page d'accueil NekoSoft + moteur fr pour tout nouvel user via /etc/skel
-mkdir -p /etc/skel/.mozilla
-# On copie le profil actuel si uBlock déjà installé manuellement (bonus, pas obligatoire)
-if [ -d "/home/$DEV_USER/.mozilla" ]; then
-    cp -a "/home/$DEV_USER/.mozilla/." /etc/skel/.mozilla/ || true
-fi
-
-info "[@] ABrowser configuré. Vérification : abrowser about:policies doit montrer uBlock force_installed"
-info "[@] Si besoin, installation manuelle de démonstration : https://addons.mozilla.org/fr/firefox/addon/ublock-origin/"
-
-# --- Kodi : root déjà vérifié en tête de script, rien à re-vérifier ici ---
-
-# 1. Dépôt universe (Trisquel/Ubuntu) : Kodi y est, 100% libre, pas de PPA/snap/flatpak
-# Justification soutenance : on reste sur dépôt officiel libre, sans binaire proprio.
-if command -v lsb_release >/dev/null 2>&1 && lsb_release -is 2>/dev/null | grep -qiE "trisquel|ubuntu"; then
-  info "[@] Activation du dépôt universe pour installer Kodi"
-  apt update
-  apt install -y software-properties-common || true
-  add-apt-repository -y universe || true
-fi
-
-# 2. Install Kodi
-info "[@] Installation de Kodi"
-apt update
-apt install -y kodi
-
-# 3. Vérif binaire + version (preuve démo/soutenance)
-info "[@] Vérification de l'installation de Kodi"
-command -v kodi
-kodi --version || true
-dpkg -l kodi | tail -5
-
-# 4. Français par défaut pour user actuel + futurs users via /etc/skel
-# Kodi lit ~/.kodi/userdata/guisettings.xml ; on pré-seede locale.language fr_fr.
-# Si Kodi écrase au 1er lancement, le réglage manuel reste : Interface > Regional > Language = French.
-info "[@] Configuration de Kodi en français pour l'utilisateur actuel et les futurs utilisateurs"
-seed_kodi_fr() {
-  BASE="$1/.kodi/userdata"
-  mkdir -p "$BASE"
-  if [ ! -f "$BASE/guisettings.xml" ]; then
-    cat > "$BASE/guisettings.xml" <<'EOF'
-<settings version="2">
-  <section id="system">
-    <category id="locale">
-      <group id="1">
-        <setting id="locale.language">resource.language.fr_fr</setting>
-        <setting id="locale.country">France</setting>
-        <setting id="locale.charset">DEFAULT</setting>
-      </group>
-    </category>
-  </section>
-</settings>
+    # Navigateur par défaut : système + modèle utilisateur
+    if [[ -x /usr/bin/abrowser ]]; then
+        update-alternatives --set x-www-browser    /usr/bin/abrowser 2>/dev/null || true
+        update-alternatives --set gnome-www-browser /usr/bin/abrowser 2>/dev/null || true
+    fi
+    mkdir -p /etc/skel/.config
+    cat > /etc/skel/.config/mimeapps.list <<'EOF'
+[Default Applications]
+text/html=abrowser.desktop
+x-scheme-handler/http=abrowser.desktop
+x-scheme-handler/https=abrowser.desktop
 EOF
-  fi
+    info "Vérification après installation : abrowser -> about:policies"
 }
 
-if [ -n "${DEV_USER:-}" ] && [ -d "/home/$DEV_USER" ]; then
-  seed_kodi_fr "/home/$DEV_USER"
-  chown -R "$DEV_USER:$DEV_USER" "/home/$DEV_USER/.kodi"
-fi
-mkdir -p /etc/skel/.kodi/userdata
-if [ ! -f /etc/skel/.kodi/userdata/guisettings.xml ]; then
-  BASE="/etc/skel/.kodi/userdata"
-  cat > "$BASE/guisettings.xml" <<'EOF'
-<settings version="2">
-  <section id="system">
-    <category id="locale">
-      <group id="1">
-        <setting id="locale.language">resource.language.fr_fr</setting>
-        <setting id="locale.country">France</setting>
-        <setting id="locale.charset">DEFAULT</setting>
-      </group>
-    </category>
-  </section>
-</settings>
-EOF
-fi
+# Live uniquement : applique le modèle /etc/skel aux utilisateurs déjà existants.
+# (En ISO, les utilisateurs créés par l'installeur héritent déjà de /etc/skel.)
+apply_to_existing_users() {
+    local u uid home
+    while IFS=: read -r u _ uid _ _ home _; do
+        if (( uid >= 1000 && uid < 60000 )) && [[ -d "$home" ]]; then
+            info "Application du modèle NekoSoft à $u"
+            if [[ -d /etc/skel/.config/pcmanfm ]]; then
+                mkdir -p "$home/.config/pcmanfm"
+                cp -a /etc/skel/.config/pcmanfm/. "$home/.config/pcmanfm/"
+                chown -R "$u:" "$home/.config/pcmanfm"
+            fi
+            if [[ ! -e "$home/.config/mimeapps.list" ]]; then
+                cp /etc/skel/.config/mimeapps.list "$home/.config/mimeapps.list"
+                chown "$u:" "$home/.config/mimeapps.list"
+            fi
+            if ! grep -qF "$BASHRC_MARK" "$home/.bashrc" 2>/dev/null; then
+                { echo; cat "$BASHRC_BLOCK"; } >> "$home/.bashrc"
+                chown "$u:" "$home/.bashrc"
+            fi
+        fi
+    done < /etc/passwd
+}
 
-# 5. Raccourci Bureau LXDE (le .desktop système existe déjà via le paquet)
-# On le copie vers le Bureau de l'utilisateur + skel pour futurs users.
-info "[@] Création des raccourcis Kodi sur les bureaux"
-if [ -f /usr/share/applications/kodi.desktop ]; then
-    if [ -n "${DEV_USER:-}" ] && [ -d "/home/$DEV_USER" ]; then
-        mkdir -p "/home/$DEV_USER/Bureau" "/home/$DEV_USER/Desktop"
-        cp -f /usr/share/applications/kodi.desktop "/home/$DEV_USER/Bureau/kodi.desktop" || true
-        cp -f /usr/share/applications/kodi.desktop "/home/$DEV_USER/Desktop/kodi.desktop" || true
-        chmod +x "/home/$DEV_USER/Bureau/kodi.desktop" "/home/$DEV_USER/Desktop/kodi.desktop" || true
-        chown "$DEV_USER:$DEV_USER" "/home/$DEV_USER/Bureau/kodi.desktop" "/home/$DEV_USER/Desktop/kodi.desktop" || true
+install_firstboot_service() {
+    info "Installation du service de premier démarrage"
+    mkdir -p "$STATE_DIR"
+    if [[ -n "$SELF" && -f "$SELF" ]]; then
+        [[ "$SELF" == "$SELF_INSTALLED" ]] || install -m 755 "$SELF" "$SELF_INSTALLED"
+    else
+        die "Le script doit être un fichier (pas 'curl | bash') pour pouvoir se réinstaller."
     fi
-    mkdir -p /etc/skel/Bureau /etc/skel/Desktop
-    cp -f /usr/share/applications/kodi.desktop /etc/skel/Bureau/ || true
-    cp -f /usr/share/applications/kodi.desktop /etc/skel/Desktop/ || true
-    chmod +x /etc/skel/Bureau/kodi.desktop /etc/skel/Desktop/kodi.desktop || true
-fi
+    # Le fond d'écran local (Cubic) n'est plus nécessaire après installation : déjà dans /usr/share/backgrounds
 
-info "[@] Kodi installé : lancez 'kodi' ou cliquez sur l'icône du bureau"
-info "[@] Vérification : kodi --version puis Interface > Regional > Language = French"
+    cat > /etc/systemd/system/nekosoft-firstboot.service <<'EOF'
+[Unit]
+Description=NekoSoft - configuration au premier démarrage
+After=network-online.target mariadb.service
+Wants=network-online.target
+ConditionPathExists=!/var/lib/nekosoft/firstboot.done
+# Ne pas s'exécuter dans la session live du CD/USB, seulement sur le système installé
+ConditionKernelCommandLine=!boot=casper
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nekosoft-setup --firstboot
+RemainAfterExit=yes
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable nekosoft-firstboot.service >/dev/null 2>&1 || true
+}
+
+cleanup_chroot() {
+    rm -f /usr/sbin/policy-rc.d
+    apt-get clean
+}
+
+# ============================================================================
+# ÉTAPE 2 : PREMIER DÉMARRAGE (machine réelle, systemd actif)
+# Chaque sous-étape pose un fichier .done => relançable sans doublon.
+# ============================================================================
+
+step_done() { [[ -e "$STATE_DIR/$1.done" ]]; }
+mark_done() { touch "$STATE_DIR/$1.done"; }
+
+fb_mariadb() {
+    step_done mariadb && return 0
+    info "MariaDB : sécurisation et compte admin"
+
+    if [[ ! -d /var/lib/mysql/mysql ]]; then
+        mariadb-install-db --user=mysql --datadir=/var/lib/mysql >/dev/null
+    fi
+    systemctl enable --now mariadb
+
+    local i
+    for i in $(seq 1 30); do
+        mariadb-admin ping --silent 2>/dev/null && break
+        [[ "$i" -eq 30 ]] && die "MariaDB ne répond pas"
+        sleep 1
+    done
+
+    local pw; pw="$(rand)"
+    mysql --user=root <<SQL
+ALTER USER 'root'@'localhost' IDENTIFIED VIA unix_socket;
+DROP USER IF EXISTS ''@'localhost';
+DROP USER IF EXISTS ''@'$(hostname)';
+DROP DATABASE IF EXISTS test;
+CREATE USER IF NOT EXISTS 'admin'@'localhost' IDENTIFIED BY '$pw';
+ALTER USER 'admin'@'localhost' IDENTIFIED BY '$pw';
+GRANT ALL PRIVILEGES ON *.* TO 'admin'@'localhost' WITH GRANT OPTION;
+FLUSH PRIVILEGES;
+SQL
+    {
+        echo "== MariaDB / phpMyAdmin (http://localhost/phpmyadmin) =="
+        echo "utilisateur : admin"
+        echo "mot de passe : $pw"
+        echo "(root : connexion locale via 'sudo mysql', sans mot de passe)"
+        echo
+    } >> "$CRED_FILE"
+    mark_done mariadb
+}
+
+fb_users() {
+    step_done users && return 0
+    info "Ajout des utilisateurs au groupe www-data"
+    local u uid home
+    if [[ -n "${DEV_USER:-}" ]]; then
+        id "$DEV_USER" >/dev/null 2>&1 || die "DEV_USER introuvable : $DEV_USER"
+        usermod -aG www-data "$DEV_USER"
+    else
+        while IFS=: read -r u _ uid _ _ home _; do
+            if (( uid >= 1000 && uid < 60000 )) && [[ -d "$home" ]]; then
+                usermod -aG www-data "$u"
+                info "  $u -> www-data (reconnexion nécessaire)"
+            fi
+        done < /etc/passwd
+    fi
+    mark_done users
+}
+
+fb_borg() {
+    step_done borg && return 0
+    info "Borg : passphrase, dépôt chiffré, sauvegarde de test"
+
+    if [[ ! -f "$BORG_PASSFILE" ]]; then
+        ( umask 077; openssl rand -base64 32 > "$BORG_PASSFILE" )
+    fi
+    mkdir -p "$BACKUP_BASE"
+    chmod 700 "$BACKUP_BASE"
+    export BORG_PASSPHRASE; BORG_PASSPHRASE="$(cat "$BORG_PASSFILE")"
+
+    if [[ ! -d "$BORG_REPO" ]]; then
+        borg init --encryption=repokey-blake2 "$BORG_REPO"
+        ( umask 077; borg key export "$BORG_REPO" /root/borg-key-backup.txt )
+    fi
+    {
+        echo "== Borg (sauvegardes chiffrées) =="
+        echo "dépôt        : $BORG_REPO"
+        echo "passphrase   : $BORG_PASSFILE"
+        echo "export clé   : /root/borg-key-backup.txt"
+        echo "=> COPIER passphrase + clé HORS de ce poste (clé USB) : sinon pas de restauration si le disque meurt."
+        echo
+    } >> "$CRED_FILE"
+
+    systemctl enable --now nekosoft-backup.timer
+    /usr/local/bin/nekosoft-backup.sh || warn "Première sauvegarde échouée (voir le message ci-dessus)"
+    mark_done borg
+}
+
+forgejo_cmd() {
+    runuser -u git -- env HOME=/home/git FORGEJO_WORK_DIR=/var/lib/forgejo \
+        /usr/local/bin/forgejo --config /etc/forgejo/app.ini --work-path /var/lib/forgejo "$@"
+}
+
+fb_forgejo() {
+    step_done forgejo && return 0
+    info "Forgejo : configuration, secrets, compte administrateur"
+
+    local gen=(runuser -u git -- env HOME=/home/git /usr/local/bin/forgejo generate secret)
+    local secret_key internal_token jwt lfs_jwt
+    secret_key="$("${gen[@]}" SECRET_KEY)"
+    internal_token="$("${gen[@]}" INTERNAL_TOKEN)"
+    jwt="$("${gen[@]}" JWT_SECRET)"
+    lfs_jwt="$("${gen[@]}" LFS_JWT_SECRET)"
+
+    umask 077
+    cat > /etc/forgejo/app.ini <<EOF
+APP_NAME = NekoSoft Forge
+RUN_USER = git
+RUN_MODE = prod
+WORK_PATH = /var/lib/forgejo
+
+[server]
+DOMAIN = localhost
+HTTP_ADDR = 127.0.0.1
+HTTP_PORT = 3000
+ROOT_URL = http://localhost:3000/
+; Accès HTTP uniquement (pas de SSH exposé sur le poste)
+DISABLE_SSH = true
+LFS_JWT_SECRET = $lfs_jwt
+
+[database]
+DB_TYPE = sqlite3
+PATH = /var/lib/forgejo/forgejo.db
+
+[repository]
+ROOT = /home/git/repositories
+
+[security]
+INSTALL_LOCK = true
+SECRET_KEY = $secret_key
+INTERNAL_TOKEN = $internal_token
+
+[oauth2]
+JWT_SECRET = $jwt
+
+[service]
+DISABLE_REGISTRATION = true
+
+[picture]
+DISABLE_GRAVATAR = true
+EOF
+    umask 022
+    chown git:git /etc/forgejo/app.ini
+    chmod 640 /etc/forgejo/app.ini
+    chmod 750 /etc/forgejo   # verrouille le dossier après génération
+
+    forgejo_cmd migrate
+    local pw; pw="$(rand)"
+    forgejo_cmd admin user create --admin --username nekoadmin --email nekoadmin@nekosoft.local \
+        --password "$pw" --must-change-password=false
+    {
+        echo "== Forgejo (http://localhost:3000) =="
+        echo "utilisateur : nekoadmin"
+        echo "mot de passe : $pw"
+        echo "(inscriptions publiques désactivées : nouveaux comptes créés par l'admin)"
+        echo
+    } >> "$CRED_FILE"
+
+    systemctl enable --now forgejo
+    mark_done forgejo
+}
+
+firstboot() {
+    mkdir -p "$STATE_DIR"
+    touch "$CRED_FILE"; chmod 600 "$CRED_FILE"
+    fb_mariadb
+    fb_users
+    fb_borg
+    fb_forgejo
+    touch "$STATE_DIR/firstboot.done"
+    info "Configuration terminée. Identifiants générés : sudo cat $CRED_FILE"
+}
+
+# ============================================================================
+# MAIN
+# ============================================================================
+main() {
+    case "${1:-}" in
+        --firstboot) require_root; firstboot; exit 0 ;;
+        -h|--help)   sed -n '2,25p' "$0"; exit 0 ;;
+    esac
+
+    require_root
+    detect_mode
+    banner
+    info "Mode détecté : $MODE  (forçable : NEKO_MODE=chroot|live)"
+
+    prepare_apt
+    install_packages
+    configure_apache
+    configure_webroot
+    install_forgejo
+    install_backup_tools
+    install_wallpaper
+    install_bashrc_block
+    install_locale
+    install_abrowser
+    apply_to_existing_users
+
+    if [[ "$MODE" == "chroot" ]]; then
+        install_firstboot_service
+        cleanup_chroot
+        info "Image prête. Au 1er démarrage de chaque machine, le service nekosoft-firstboot terminera la configuration."
+    else
+        firstboot
+        info "Déconnecte/reconnecte ta session pour : groupe www-data, fond d'écran, alias."
+    fi
+}
+
+main "$@"
