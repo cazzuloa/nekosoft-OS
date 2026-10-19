@@ -254,8 +254,13 @@ check_firstboot() {
     if [[ -e "$STATE_DIR/firstboot.done" ]]; then ok "firstboot.done présent"
     else ko "firstboot.done ABSENT" "sudo $SELF_INSTALLED --firstboot"; fi
 
-    if [[ -x "$SELF_INSTALLED" ]]; then ok "$SELF_INSTALLED : présent (réinstallation du script)"
-    else ko "$SELF_INSTALLED : ABSENT" "setup.sh doit être lancé en mode chroot pour s'auto-installer"; fi
+    # Le script réinstallé n'existe qu'avec le service firstboot (image Cubic / mode chroot)
+    if [[ -f /etc/systemd/system/nekosoft-firstboot.service ]]; then
+        if [[ -x "$SELF_INSTALLED" ]]; then ok "$SELF_INSTALLED : présent (utilisé par nekosoft-firstboot)"
+        else ko "$SELF_INSTALLED : ABSENT alors que nekosoft-firstboot.service existe" "relance setup.sh dans le chroot Cubic"; fi
+    else
+        ok "installation directe (mode live) : pas de service firstboot, $SELF_INSTALLED non requis"
+    fi
 
     if [[ -f "$CRED_FILE" ]]; then
         if [[ "$(stat -c %a "$CRED_FILE")" == "600" ]]; then ok "$CRED_FILE : présent, droits 600"
