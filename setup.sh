@@ -5,6 +5,7 @@
 #
 # Options : NEKO_MODE=chroot|live   FORGEJO_VERSION=x.y.z   DEV_USER=nom
 #           NEKO_PHPINFO=1 (crée /var/www/html/info.php pour la démo)
+#           NEKO_DEMO=1 (lance demo.sh : page Apache + Kodi) ; NEKO_DEMO_ARGS="--no-kodi" pour sans Kodi
 # =============================================================================
 
 set -Eeuo pipefail
@@ -670,6 +671,16 @@ main() {
     install_locale
     install_abrowser
     apply_to_existing_users
+
+    # Démo optionnelle : page d'accueil Apache + Kodi préconfiguré (non bloquant)
+    if [[ "${NEKO_DEMO:-0}" == "1" ]]; then
+        if [[ -f "$SCRIPT_DIR/demo.sh" ]]; then
+            # shellcheck disable=SC2086
+            bash "$SCRIPT_DIR/demo.sh" ${NEKO_DEMO_ARGS:-} || warn "demo.sh a échoué (voir les messages ci-dessus)"
+        else
+            warn "NEKO_DEMO=1 mais demo.sh est introuvable à côté de setup.sh ($SCRIPT_DIR)"
+        fi
+    fi
 
     if [[ "$MODE" == "chroot" ]]; then
         install_firstboot_service

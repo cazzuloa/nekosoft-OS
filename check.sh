@@ -3,8 +3,7 @@
 # NekoSoft - vérification du poste (compagnon de setup.sh)
 # SAE 1.03 - @cazzuloa
 #
-# À lancer sur la VM / machine INSTALLÉE (pas dans le chroot Cubic) :
-# la plupart des checks exigent systemd et les services démarrés.
+# À lancer sur la VM / machine INSTALLÉE 
 #
 # Usage :
 #   sudo bash check.sh                     # vérification complète
@@ -12,10 +11,6 @@
 #   sudo bash check.sh --user=dev1         # un utilisateur dev précis
 #   bash check.sh --no-color               # sortie sans couleur (logs)
 #
-# Sections : packages, services, firstboot, mariadb, web, forgejo, backup,
-#            webroot, desktop, terminal, locale, abrowser
-#
-# Code retour : 0 = conforme, 1 = au moins un échec, 2 = erreur d'argument.
 # =============================================================================
 
 set -uo pipefail
@@ -36,7 +31,7 @@ UBLOCK_ID="uBlock0@raymondhill.net"
 UBLOCK_LOCAL="/usr/share/nekosoft/ublock-origin.xpi"
 PCMANFM_PROFILES=(default lxde LXDE Trisquel-mini trisquel-mini)
 FORGEJO_ADMIN="nekoadmin"
-SECTION_ORDER=(packages services firstboot mariadb web forgejo backup webroot desktop terminal locale abrowser)
+SECTION_ORDER=(packages services firstboot mariadb web forgejo backup webroot desktop terminal locale abrowser demo)
 
 # ----------------------------- Affichage -------------------------------------
 if [[ -t 1 ]]; then
@@ -743,6 +738,61 @@ PY
     alt="$(readlink -f /etc/alternatives/x-www-browser 2>/dev/null)"
     if [[ "$alt" == *abrowser* ]]; then ok "x-www-browser : $alt"
     else warn "x-www-browser pointe vers '${alt:-rien}'" "sudo update-alternatives --set x-www-browser /usr/bin/abrowser"; fi
+}
+
+# =============================================================================
+# 13. Démo : page Apache + Kodi (demo.sh) - uniquement si la démo est installée
+# =============================================================================
+check_demo() {
+    local web=0 kodi=0
+    [[ -e "$STATE_DIR/demo-web.done"  ]] && web=1
+    [[ -e "$STATE_DIR/demo-kodi.done" ]] && kodi=1
+    if [[ $web -eq 0 && $kodi -eq 0 ]]; then
+        if [[ ${#SECTIONS[@]} -gt 0 ]]; then
+            section "Démo (demo.sh)"
+            ko "demo.sh n'a pas été exécuté" "sudo bash demo.sh"
+        else
+            info "[@] Démo non installée (demo.sh) : section ignorée"
+        fi
+        return
+    fi
+
+    section "Démo : page Apache + Kodi"
+    if [[ $web -eq 1 ]]; then
+        if [[ -f /var/www/html/index.php ]]; then ok "/var/www/html/index.php : présent"
+        else ko "/var/www/html/index.php : ABSENT" "sudo bash demo.sh"; fi
+
+        if [[ -f /var/www/html/index.html ]]; then
+            ko "/var/www/html/index.html existe et masque index.php (DirectoryIndex)" "sudo mv /var/www/html/index.html /var/www/html/index.html.old"
+        fi
+
+        # La page teste elle-même les services côté serveur : on lit son verdict
+        local page; page="$(curl -fsS --max-time 10 http://localhost/ 2>/dev/null)"
+        if grep -q 'nekosoft-demo-page' <<<"$page"; then
+            ok "http://localhost/ : page NekoSoft servie"
+            local svc
+            for svc in php mariadb forgejo; do
+                if grep -q "data-service=\"$svc\" data-up=\"1\"" <<<"$page"; then ok "page de démo : $svc répond (testé côté serveur)"
+                else ko "page de démo : $svc ne répond pas" "voir : sudo bash $0 ${svc/php/web}"; fi
+            done
+        else
+            ko "http://localhost/ ne sert pas la page NekoSoft" "sudo bash demo.sh ; vérifier index.html / PHP"
+        fi
+    fi
+
+    if [[ $kodi -eq 1 ]]; then
+        if pkg_installed kodi; then ok "kodi : installé"
+        else ko "kodi : paquet ABSENT" "sudo apt install -y kodi"; fi
+
+        local h f
+        local targets=("/etc/skel")
+        local u; for u in "${DEV_USERS[@]}"; do targets+=("$(home_of "$u")"); done
+        for h in "${targets[@]}"; do
+            f="$h/.kodi/userdata/guisettings.xml"
+            if [[ -f "$f" ]] && grep -q 'resource.language.fr_fr' "$f"; then ok "$f : Kodi en français"
+            else ko "$f : config française absente" "fermer Kodi puis : sudo bash demo.sh"; fi
+        done
+    fi
 }
 
 # =============================================================================
