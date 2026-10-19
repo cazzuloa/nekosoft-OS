@@ -85,6 +85,31 @@ Si vous avez une machine avec Trisquel 12 Mini de déjà installer, vous pouvez 
 curl -fsSL https://raw.githubusercontent.com/cazzuloa/nekosoft-OS/refs/heads/main/setup.sh | bash
 ```
 
+## Démo (page Apache + Kodi)
+
+`demo.sh` installe la page d'accueil Apache NekoSoft et préconfigure Kodi en
+français, avec des médias de démonstration (dessins animés et musique libres,
+issus d'archive.org) accessibles à tous les utilisateurs.
+
+```bash
+sudo bash demo.sh                 # page web + Kodi + médias
+sudo bash demo.sh --no-media      # sans les 292 Mo de médias
+sudo bash demo.sh --remove        # retire la page de démo
+```
+
+Les médias sont extraits une seule fois dans `/srv/nekosoft/media` (partagé par
+tous les comptes, y compris les futurs utilisateurs via `/etc/skel`) et
+déclarés comme sources Films / Séries / Musique dans Kodi. Chemin
+personnalisable avec `NEKO_MEDIA_DIR=/chemin bash demo.sh`.
+
+L'archive est versionnée découpée en parts de 90 Mo (`demo/kodi/media.tar.gz.00`
+à `.03`) car GitHub refuse les fichiers de plus de 100 Mo. Après modification
+des médias, régénérer l'archive avec :
+
+```bash
+bash scripts/pack-demo-media.sh
+```
+
 # Todo 
 
 - [x] Finir le markdown et le wiki.

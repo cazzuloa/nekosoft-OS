@@ -19,6 +19,8 @@ set -uo pipefail
 
 # ----------------------------- Constantes (miroir de setup.sh) ---------------
 STATE_DIR="/var/lib/nekosoft"
+MEDIA_DIR="/srv/nekosoft/media"
+[[ -r "$STATE_DIR/media-dir" ]] && MEDIA_DIR="$(cat "$STATE_DIR/media-dir")"
 CRED_FILE="/root/nekosoft-credentials.txt"
 SELF_INSTALLED="/usr/local/sbin/nekosoft-setup"
 BASHRC_MARK="# --- NekoSoft ---"
@@ -744,10 +746,11 @@ PY
 # 13. Démo : page Apache + Kodi (demo.sh) - uniquement si la démo est installée
 # =============================================================================
 check_demo() {
-    local web=0 kodi=0
-    [[ -e "$STATE_DIR/demo-web.done"  ]] && web=1
-    [[ -e "$STATE_DIR/demo-kodi.done" ]] && kodi=1
-    if [[ $web -eq 0 && $kodi -eq 0 ]]; then
+    local web=0 kodi=0 media=0
+    [[ -e "$STATE_DIR/demo-web.done"   ]] && web=1
+    [[ -e "$STATE_DIR/demo-kodi.done"  ]] && kodi=1
+    [[ -e "$STATE_DIR/demo-media.done" ]] && media=1
+    if [[ $web -eq 0 && $kodi -eq 0 && $media -eq 0 ]]; then
         if [[ ${#SECTIONS[@]} -gt 0 ]]; then
             section "Démo (demo.sh)"
             ko "demo.sh n'a pas été exécuté" "sudo bash demo.sh"
@@ -758,6 +761,16 @@ check_demo() {
     fi
 
     section "Démo : page Apache + Kodi"
+    if [[ $media -eq 1 ]]; then
+        if [[ -d "$MEDIA_DIR" ]]; then
+            local n; n="$(find "$MEDIA_DIR" -type f 2>/dev/null | wc -l)"
+            if (( n > 0 )); then ok "$MEDIA_DIR : $n fichier(s) de démo"
+            else ko "$MEDIA_DIR : vide" "sudo bash demo.sh"; fi
+        else
+            ko "$MEDIA_DIR : ABSENT" "sudo bash demo.sh"
+        fi
+    fi
+
     if [[ $web -eq 1 ]]; then
         if [[ -f /var/www/html/index.php ]]; then ok "/var/www/html/index.php : présent"
         else ko "/var/www/html/index.php : ABSENT" "sudo bash demo.sh"; fi
@@ -791,6 +804,10 @@ check_demo() {
             f="$h/.kodi/userdata/guisettings.xml"
             if [[ -f "$f" ]] && grep -q 'resource.language.fr_fr' "$f"; then ok "$f : Kodi en français"
             else ko "$f : config française absente" "fermer Kodi puis : sudo bash demo.sh"; fi
+
+            f="$h/.kodi/userdata/sources.xml"
+            if [[ -f "$f" ]] && grep -q "$MEDIA_DIR" "$f"; then ok "$f : sources média NekoSoft"
+            else ko "$f : sources média absentes" "fermer Kodi puis : sudo bash demo.sh"; fi
         done
     fi
 }

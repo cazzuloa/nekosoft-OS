@@ -3,10 +3,17 @@
 # NekoSoft - démo : page Apache personnalisée + Kodi préconfiguré
 # SAE 1.03 - @cazzuloa | https://github.com/cazzuloa/nekosoft-OS
 #
-# Usage : sudo bash demo.sh [--no-web] [--no-kodi] [--remove]
+# Usage : sudo bash demo.sh [--no-web] [--no-kodi] [--no-media] [--remove]
 #   --no-web    ne pas installer la page d'accueil Apache
 #   --no-kodi   ne pas installer Kodi ni sa configuration
+#   --no-media  ne pas déployer les médias de démonstration
 #   --remove    retire la page de démo et restaure la page Apache d'origine
+#               (la config Kodi et les médias partagés sont conservés)
+#
+# Médias : l'archive du dépôt (demo/kodi/media.tar.gz.00, .01, ...) est
+# décompressée dans $NEKO_MEDIA_DIR (défaut /srv/nekosoft/media), partagée
+# par tous les utilisateurs et référencée dans les sources de Kodi.
+# La regénérer avec : bash scripts/pack-demo-media.sh
 #
 # Peut aussi être appelé par setup.sh :  sudo NEKO_DEMO=1 bash setup.sh
 # =============================================================================
@@ -19,13 +26,14 @@ REPO_URL="${NEKO_REPO_URL:-https://github.com/cazzuloa/nekosoft-OS.git}"
 WEBROOT="${NEKO_WEBROOT:-/var/www/html}"
 SKEL_DIR="${NEKO_SKEL:-/etc/skel}"
 STATE_DIR="${NEKO_STATE_DIR:-/var/lib/nekosoft}"
+MEDIA_DIR="${NEKO_MEDIA_DIR:-/srv/nekosoft/media}"
 APACHE_DEFAULT_SAVE="$STATE_DIR/apache-default-index.html"
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
 SCRIPT_DIR="$(dirname "${SELF:-/root/x}")"
 DEMO_SRC="${DEMO_SRC:-}"
 CLONE_DIR=""
-DO_WEB=1; DO_KODI=1; DO_REMOVE=0
+DO_WEB=1; DO_KODI=1; DO_MEDIA=1; DO_REMOVE=0
 export DEBIAN_FRONTEND=noninteractive
 
 # ----------------------------- Outils ----------------------------------------
@@ -37,6 +45,10 @@ die()  { echo "[ERREUR] $*" >&2; exit 1; }
 
 cleanup() { [[ -n "$CLONE_DIR" ]] && rm -rf "$CLONE_DIR"; return 0; }
 trap cleanup EXIT
+
+usage() {
+    awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); if ($0 !~ /^=+$/) print; next } { exit }' "$0"
+}
 
 # Utilisateurs humains (même critère que setup.sh) : "login:home"
 list_users() {
@@ -113,10 +125,88 @@ remove_web() {
     rm -f "$STATE_DIR/demo-web.done"
 }
 
+# ----------------------------- Médias partagés -------------------------------
+# Archive entière (media.tar.gz) ou parts numérotées (media.tar.gz.00, .01, ...)
+list_media_parts() {
+    local d="$DEMO_SRC/kodi" p n=0
+    if [[ -f "$d/media.tar.gz" ]]; then
+        printf '%s\n' "$d/media.tar.gz"
+        return 0
+    fi
+    for p in "$d"/media.tar.gz.[0-9][0-9]; do
+        [[ -f "$p" ]] || continue
+        printf '%s\n' "$p"
+        n=$((n + 1))
+    done
+    (( n > 0 ))
+}
+
+install_media() {
+    local manifest="$DEMO_SRC/kodi/media.sha256"
+    local want="" have="" staging parent p
+    local -a parts=()
+
+    [[ -n "$MEDIA_DIR" && "$MEDIA_DIR" != "/" ]] || die "NEKO_MEDIA_DIR invalide : '$MEDIA_DIR'"
+
+    mapfile -t parts < <(list_media_parts || true)
+    if (( ${#parts[@]} == 0 )); then
+        die "aucune archive média dans $DEMO_SRC/kodi (générer avec : bash scripts/pack-demo-media.sh)"
+    fi
+
+    if [[ -f "$manifest" ]]; then
+        want="$(awk 'NR == 1 { print $1 }' "$manifest")"
+        info "Médias : vérification de l'archive (${#parts[@]} part(s))"
+        have="$(cat "${parts[@]}" | sha256sum | awk '{print $1}')"
+        [[ "$want" == "$have" ]] \
+            || die "archive média corrompue ($have ≠ $want) : re-cloner le dépôt ou relancer scripts/pack-demo-media.sh"
+    else
+        warn "manifeste absent ($manifest) : extraction sans vérification d'intégrité"
+        want="$(cat "${parts[@]}" | sha256sum | awk '{print $1}')"
+    fi
+
+    # Déjà décompressé et à jour ? (empreinte gravée après extraction)
+    if [[ -n "$want" && -d "$MEDIA_DIR" && -f "$MEDIA_DIR/.nekosoft-media" ]] \
+       && [[ "$want" == "$(cat "$MEDIA_DIR/.nekosoft-media")" ]]; then
+        info "Médias : $MEDIA_DIR déjà à jour"
+        mkdir -p "$STATE_DIR"
+        printf '%s\n' "$MEDIA_DIR" > "$STATE_DIR/media-dir"
+        touch "$STATE_DIR/demo-media.done"
+        return 0
+    fi
+
+    info "Médias : extraction vers $MEDIA_DIR"
+    parent="$(dirname "$MEDIA_DIR")"
+    mkdir -p "$parent"
+    staging="$(mktemp -d "$parent/.nekosoft-media.XXXXXX")"
+    if ! cat "${parts[@]}" | tar -xzf - -C "$staging"; then
+        rm -rf "$staging"
+        die "extraction de l'archive média impossible"
+    fi
+    if [[ -z "$(find "$staging" -type f -print -quit)" ]]; then
+        rm -rf "$staging"
+        die "archive média vide"
+    fi
+
+    for p in film serie music; do
+        [[ -d "$staging/$p" ]] || warn "dossier média inattendu : $p absent de l'archive"
+    done
+
+    # Remplacement atomique : on ne supprime l'ancien contenu qu'une fois le nouveau prêt
+    rm -rf "$MEDIA_DIR"
+    mv "$staging" "$MEDIA_DIR"
+    chmod -R u=rwX,go=rX "$MEDIA_DIR"
+    [[ -n "$want" ]] && printf '%s\n' "$want" > "$MEDIA_DIR/.nekosoft-media"
+
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "$MEDIA_DIR" > "$STATE_DIR/media-dir"
+    touch "$STATE_DIR/demo-media.done"
+    info "Médias : $(du -sh "$MEDIA_DIR" | cut -f1) disponibles pour tous les utilisateurs"
+}
+
 # ----------------------------- Kodi ------------------------------------------
 # $1 = dossier home ; $2 = propriétaire (vide pour /etc/skel)
 deploy_kodi_to() {
-    local home="$1" owner="${2:-}" dst="$1/.kodi" rel t
+    local home="$1" owner="${2:-}" dst="$1/.kodi" rel t f
 
     # Kodi réécrit guisettings.xml à sa fermeture : inutile de copier pendant qu'il tourne
     if [[ -n "$owner" ]] && pgrep -u "$owner" -x 'kodi(\.bin|-x11)?' >/dev/null 2>&1; then
@@ -125,25 +215,40 @@ deploy_kodi_to() {
     fi
 
     mkdir -p "$dst/userdata"
-    # Sauvegarde de la config d'origine, une seule fois, et seulement si elle diffère de la nôtre
-    if [[ -f "$dst/userdata/guisettings.xml" && ! -e "$dst/userdata/guisettings.xml.bak-nekosoft" ]] \
-       && ! cmp -s "$dst/userdata/guisettings.xml" "$DEMO_SRC/kodi/userdata/guisettings.xml"; then
-        cp -a "$dst/userdata/guisettings.xml" "$dst/userdata/guisettings.xml.bak-nekosoft"
+    # Ancienne version de la démo : les médias étaient copiés dans ~/.kodi/media
+    if [[ -d "$dst/media" ]]; then
+        warn "$dst/media : ancienne copie locale des médias (désormais partagés dans $MEDIA_DIR)"
+        warn "  à supprimer pour libérer l'espace : sudo rm -rf '$dst/media'"
     fi
-    cp -a "$DEMO_SRC/kodi/." "$dst/"
+    # Sauvegarde de la config d'origine, une seule fois, et seulement si elle diffère de la nôtre
+    for f in guisettings.xml sources.xml; do
+        [[ -f "$dst/userdata/$f" ]] || continue
+        [[ -e "$dst/userdata/$f.bak-nekosoft" ]] && continue
+        cmp -s "$dst/userdata/$f" "$DEMO_SRC/kodi/userdata/$f" && continue
+        cp -a "$dst/userdata/$f" "$dst/userdata/$f.bak-nekosoft"
+    done
+
+    # Seule la configuration est copiée : les médias restent dans $MEDIA_DIR (partagés)
+    cp -a "$DEMO_SRC/kodi/userdata/." "$dst/userdata/"
+
+    # NEKO_MEDIA_DIR personnalisé : on réécrit les chemins des sources Kodi
+    if [[ "$MEDIA_DIR" != "/srv/nekosoft/media" && -f "$dst/userdata/sources.xml" ]]; then
+        local esc="${MEDIA_DIR//\\/\\\\}"; esc="${esc//&/\\&}"; esc="${esc//|/\\|}"
+        sed -i "s|/srv/nekosoft/media|$esc|g" "$dst/userdata/sources.xml"
+    fi
 
     # Droits : uniquement sur ce qu'on a copié
     while IFS= read -r -d '' rel; do
-        t="$dst/${rel#./}"
+        t="$dst/userdata/${rel#./}"
         if [[ -d "$t" ]]; then chmod 755 "$t"; else chmod 644 "$t"; fi
-    done < <(cd "$DEMO_SRC/kodi" && find . -mindepth 1 -print0)
+    done < <(cd "$DEMO_SRC/kodi/userdata" && find . -mindepth 1 -print0)
 
     if [[ -n "$owner" ]]; then chown -R "$owner:" "$dst"; fi
     return 0
 }
 
 install_kodi() {
-    [[ -d "$DEMO_SRC/kodi" ]] || die "$DEMO_SRC/kodi introuvable"
+    [[ -d "$DEMO_SRC/kodi/userdata" ]] || die "$DEMO_SRC/kodi/userdata introuvable"
     info "Kodi : installation et configuration en français"
 
     if ! dpkg-query -W -f='${Status}' kodi 2>/dev/null | grep -q '^install ok installed$'; then
@@ -151,6 +256,8 @@ install_kodi() {
         info "Installation du paquet kodi (volumineux : prévoir quelques minutes)"
         apt-get -y -o Dpkg::Options::=--force-confold install kodi
     fi
+
+    [[ -d "$MEDIA_DIR" ]] || warn "$MEDIA_DIR absent : les sources Kodi pointeront dans le vide (relance sans --no-media)"
 
     mkdir -p "$STATE_DIR"
     deploy_kodi_to "$SKEL_DIR" ""            # nouveaux utilisateurs
@@ -176,10 +283,11 @@ main() {
     local arg
     for arg in "$@"; do
         case "$arg" in
-            --no-web)  DO_WEB=0 ;;
-            --no-kodi) DO_KODI=0 ;;
-            --remove)  DO_REMOVE=1 ;;
-            -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+            --no-web)   DO_WEB=0 ;;
+            --no-kodi)  DO_KODI=0 ;;
+            --no-media) DO_MEDIA=0 ;;
+            --remove)   DO_REMOVE=1 ;;
+            -h|--help)  usage; exit 0 ;;
             *) die "option inconnue : $arg (voir --help)" ;;
         esac
     done
@@ -189,18 +297,20 @@ main() {
 
     if [[ "$DO_REMOVE" -eq 1 ]]; then
         remove_web
-        info "Démo retirée (la config Kodi des utilisateurs est conservée)."
+        info "Démo retirée (config Kodi et médias partagés conservés)."
         return 0
     fi
 
-    [[ "$DO_WEB"  -eq 1 ]] && install_web
-    [[ "$DO_KODI" -eq 1 ]] && install_kodi
+    [[ "$DO_MEDIA" -eq 1 ]] && install_media
+    [[ "$DO_WEB"   -eq 1 ]] && install_web
+    [[ "$DO_KODI"  -eq 1 ]] && install_kodi
 
     mkdir -p "$STATE_DIR"
     touch "$STATE_DIR/demo.done"
     info "Démo prête."
-    [[ "$DO_WEB"  -eq 1 ]] && info "  Page d'accueil : http://localhost/"
-    [[ "$DO_KODI" -eq 1 ]] && info "  Kodi           : menu Applications (ou raccourci du bureau), reconnexion conseillée"
+    [[ "$DO_WEB"   -eq 1 ]] && info "  Page d'accueil : http://localhost/"
+    [[ "$DO_MEDIA" -eq 1 ]] && info "  Médias         : $MEDIA_DIR"
+    [[ "$DO_KODI"  -eq 1 ]] && info "  Kodi           : menu Applications (ou raccourci du bureau), reconnexion conseillée"
     return 0
 }
 
