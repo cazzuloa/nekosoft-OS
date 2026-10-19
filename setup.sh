@@ -159,7 +159,9 @@ install_forgejo() {
     chown git:git /var/lib/forgejo /var/log/forgejo
     chmod 750 /var/lib/forgejo
     chown root:git /etc/forgejo
-    chmod 770 /etc/forgejo
+    # 770 uniquement le temps de générer app.ini (fb_forgejo le repasse en 750).
+    # Si app.ini existe déjà (setup.sh relancé), on ne rouvre pas le dossier.
+    if [[ -f /etc/forgejo/app.ini ]]; then chmod 750 /etc/forgejo; else chmod 770 /etc/forgejo; fi
 
     local v="$FORGEJO_VERSION"
     local url="https://codeberg.org/forgejo/forgejo/releases/download/v${v}/forgejo-${v}-linux-amd64"
@@ -393,6 +395,20 @@ EOF
     info "Vérification après installation : abrowser -> about:policies"
 }
 
+# Crée ou complète un mimeapps.list pour que abrowser soit le navigateur par défaut.
+# Un fichier existant (créé par la session) est mis à jour, pas ignoré.
+set_default_browser() {   # $1 = chemin du mimeapps.list
+    local f="$1" k
+    mkdir -p "$(dirname "$f")"
+    [[ -e "$f" ]] || printf '[Default Applications]\n' > "$f"
+    grep -q '^\[Default Applications\]' "$f" || printf '\n[Default Applications]\n' >> "$f"
+    for k in text/html x-scheme-handler/http x-scheme-handler/https; do
+        # supprime l'ancienne valeur dans la section [Default Applications] uniquement, puis réinsère
+        sed -i "/^\[Default Applications\]/,/^\[/{/^${k//\//\\/}=/d}" "$f"
+        sed -i "/^\[Default Applications\]/a ${k}=abrowser.desktop" "$f"
+    done
+}
+
 # Live uniquement : applique le modèle /etc/skel aux utilisateurs déjà existants.
 # (En ISO, les utilisateurs créés par l'installeur héritent déjà de /etc/skel.)
 apply_to_existing_users() {
@@ -405,10 +421,8 @@ apply_to_existing_users() {
                 cp -a /etc/skel/.config/pcmanfm/. "$home/.config/pcmanfm/"
                 chown -R "$u:" "$home/.config/pcmanfm"
             fi
-            if [[ ! -e "$home/.config/mimeapps.list" ]]; then
-                cp /etc/skel/.config/mimeapps.list "$home/.config/mimeapps.list"
-                chown "$u:" "$home/.config/mimeapps.list"
-            fi
+            set_default_browser "$home/.config/mimeapps.list"
+            chown "$u:" "$home/.config/mimeapps.list"
             if ! grep -qF "$BASHRC_MARK" "$home/.bashrc" 2>/dev/null; then
                 { echo; cat "$BASHRC_BLOCK"; } >> "$home/.bashrc"
                 chown "$u:" "$home/.bashrc"

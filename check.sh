@@ -19,6 +19,8 @@
 # =============================================================================
 
 set -uo pipefail
+# NB : volontairement SANS set -e : un check qui échoue doit être affiché,
+# pas interrompre la vérification.
 
 # ----------------------------- Constantes (miroir de setup.sh) ---------------
 STATE_DIR="/var/lib/nekosoft"
@@ -72,7 +74,10 @@ pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q '^inst
 have_systemd()  { [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; }
 svc_enabled()   { systemctl is-enabled "$1" >/dev/null 2>&1; }
 svc_active()    { systemctl is-active  "$1" >/dev/null 2>&1; }
-unit_exists()   { systemctl list-unit-files "$1" --no-legend 2>/dev/null | grep -q .; }
+unit_exists()   {   # list-unit-files exige le nom complet : on ajoute .service si besoin
+    local u="$1"; [[ "$u" == *.* ]] || u="$u.service"
+    systemctl list-unit-files "$u" --no-legend 2>/dev/null | grep -q .
+}
 http_code()     { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$1" 2>/dev/null; }
 http_code_L()   { curl -sL -o /dev/null -w '%{http_code}' --max-time 10 "$1" 2>/dev/null; }
 in_group()      { id -nG "$1" 2>/dev/null | tr ' ' '\n' | grep -qx "$2"; }
@@ -105,6 +110,7 @@ check_files_contain() {
 }
 
 # ----------------------------- Arguments -------------------------------------
+ORIG_ARGS=("$@")
 DEV_USERS=()
 FORCED_USER=""
 SECTIONS=()
@@ -139,6 +145,13 @@ WANT() {
     local s; for s in "${SECTIONS[@]}"; do [[ "$s" == "$1" ]] && return 0; done
     return 1
 }
+
+# Relance automatique avec sudo : sans root, une partie des checks est ignorée ou fausse
+# (ex. /etc/forgejo et /root illisibles). NEKO_NO_SUDO=1 pour désactiver.
+if [[ "$(id -u)" -ne 0 && -z "${NEKO_NO_SUDO:-}" ]] && command -v sudo >/dev/null 2>&1; then
+    info "[@] Relance avec sudo (nécessaire pour tout vérifier)"
+    exec sudo bash "$0" "${ORIG_ARGS[@]}"
+fi
 
 info "[@] NekoSoft check - $(date '+%Y-%m-%d %H:%M:%S')"
 
@@ -211,8 +224,12 @@ check_services() {
     if unit_exists nekosoft-firstboot.service; then
         if svc_enabled nekosoft-firstboot.service; then ok "nekosoft-firstboot : activé"
         else ko "nekosoft-firstboot : NON activé" "sudo systemctl enable nekosoft-firstboot"; fi
+    elif [[ -e "$STATE_DIR/firstboot.done" ]]; then
+        # setup.sh lancé directement sur la machine (mode live) : pas de service, config faite en direct
+        ok "nekosoft-firstboot : non installé, configuration faite en direct (setup.sh mode live)"
     else
-        ko "nekosoft-firstboot.service : unité absente" "relance setup.sh en mode chroot (image Cubic)"
+        ko "nekosoft-firstboot.service : unité absente" \
+           "image Cubic : relance setup.sh dans le chroot ; machine directe : sudo bash setup.sh"
     fi
 }
 
@@ -417,6 +434,8 @@ check_forgejo() {
         done
         if [[ ${#bad[@]} -eq 0 ]]; then ok "$ini : écoute locale, sqlite3, install verrouillée, inscriptions fermées"
         else ko "$ini : paramètres manquants : ${bad[*]}" "relance le firstboot (supprimer $STATE_DIR/forgejo.done)"; fi
+    elif [[ "$ROOT_OK" -ne 1 && ! -x /etc/forgejo ]]; then
+        skip "$ini : illisible sans root (dossier root:git)" "relance : sudo bash $0"
     else
         ko "$ini : ABSENT" "sudo $SELF_INSTALLED --firstboot"
     fi
