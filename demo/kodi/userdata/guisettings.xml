@@ -1,0 +1,8 @@
+<settings version="2">
+    <!-- NekoSoft : configuration Kodi prête à l'emploi (copiée dans ~/.kodi/userdata/ par demo.sh).
+        Fichier volontairement minimal : Kodi complète les réglages absents avec ses valeurs par défaut. -->
+    <setting id="locale.language">resource.language.fr_fr</setting>
+    <setting id="locale.country">France</setting>
+    <setting id="locale.timezonecountry">France</setting>
+    <setting id="locale.timezone">Europe/Paris</setting>
+</settings>
