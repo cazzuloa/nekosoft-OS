@@ -1,12 +1,6 @@
 <?php
 declare(strict_types=1);
-/*
- * NekoSoft - page d'accueil de démonstration (déployée par demo.sh).
- *
- * Chaque ligne teste réellement le service côté serveur : si la page s'affiche
- * avec tout en "OK", c'est que Apache, PHP, MariaDB et Forgejo répondent vraiment.
- * Aucune ressource externe : la page fonctionne hors-ligne.
- */
+date_default_timezone_set('Europe/Paris');
 
 function h(string $s): string
 {
@@ -91,14 +85,13 @@ $allUp = !in_array(false, array_column($services, 1), true);
 </head>
 <body>
 
-<h1>NekoSoft — état des services</h1>
-<p class="lead">Poste de développement Web · Trisquel 12 Mini</p>
+<h1>NekoSoft - état des services</h1>
 
 <p class="summary<?= $allUp ? '' : ' ko' ?>">
 <?php if ($allUp): ?>
   Testé à <?= h(date('H:i')) ?> : tous les services répondent.
 <?php else: ?>
-  Attention : au moins un service ne répond pas (voir le tableau).
+  Attention : y en a un qui marche pas :sob:
 <?php endif; ?>
 </p>
 
@@ -121,13 +114,5 @@ $allUp = !in_array(false, array_column($services, 1), true);
   </tr>
 <?php endforeach; ?>
 </table>
-
-<footer>
-  Machine <strong><?= h((string) gethostname()) ?></strong> ·
-  <?= h(php_uname('s') . ' ' . php_uname('r')) ?> ·
-  <?= h(date('d/m/Y H:i')) ?><br>
-  Dossier de développement : <code>/var/www/html</code> · page générée par <code>demo.sh</code>
-</footer>
-
 </body>
 </html>
