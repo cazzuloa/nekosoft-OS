@@ -252,7 +252,11 @@ install_kodi() {
     info "Kodi : installation et configuration en français"
 
     if ! dpkg-query -W -f='${Status}' kodi 2>/dev/null | grep -q '^install ok installed$'; then
-        apt-cache show kodi >/dev/null 2>&1 || die "paquet 'kodi' introuvable dans les dépôts (apt-get update ?)"
+        if ! apt-cache show kodi >/dev/null 2>&1; then
+            info "Mise à jour de la liste des paquets"
+            apt-get update || die "apt-get update impossible (réseau ?)"
+        fi
+        apt-cache show kodi >/dev/null 2>&1 || die "paquet 'kodi' introuvable dans les dépôts"
         info "Installation du paquet kodi (volumineux : prévoir quelques minutes)"
         apt-get -y -o Dpkg::Options::=--force-confold install kodi
     fi
