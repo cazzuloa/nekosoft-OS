@@ -642,7 +642,7 @@ main() {
 
     require_root
     detect_mode
-    banner
+    __banner
     info "Mode détecté : $MODE  (forçable : NEKO_MODE=chroot|live)"
 
     prepare_apt
