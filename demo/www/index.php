@@ -3,8 +3,8 @@ declare(strict_types=1);
 /*
  * NekoSoft - page d'accueil de démonstration (déployée par demo.sh).
  *
- * Chaque carte teste réellement le service côté serveur : si la page s'affiche
- * avec tout en vert, c'est que Apache, PHP, MariaDB et Forgejo répondent vraiment.
+ * Chaque ligne teste réellement le service côté serveur : si la page s'affiche
+ * avec tout en "OK", c'est que Apache, PHP, MariaDB et Forgejo répondent vraiment.
  * Aucune ressource externe : la page fonctionne hors-ligne.
  */
 
@@ -66,69 +66,68 @@ $allUp = !in_array(false, array_column($services, 1), true);
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NekoSoft · poste de développement Web</title>
+<title>NekoSoft - état des services</title>
 <style>
-  :root {
-    --bg: #1e1b2e; --card: #2a2640; --line: #3d3860;
-    --text: #f2eefc; --muted: #a79fc9; --accent: #d787ff;
-    --up: #5be38f; --down: #ff6b81;
-  }
-  * { box-sizing: border-box; }
   body {
-    margin: 0; padding: 2rem 1rem 3rem; min-height: 100vh;
-    background: var(--bg); color: var(--text);
-    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; line-height: 1.5;
+    font-family: Arial, Helvetica, sans-serif;
+    background: #fff; color: #222;
+    max-width: 680px; margin: 2rem auto; padding: 0 1rem;
+    line-height: 1.5;
   }
-  main { max-width: 860px; margin: 0 auto; }
-  h1 { margin: 0 0 .25rem; font-size: 2rem; color: var(--accent); }
-  .sub { margin: 0 0 1.5rem; color: var(--muted); }
-  .banner {
-    padding: .9rem 1.1rem; border-radius: 10px; margin-bottom: 1.5rem; font-weight: 600;
-    border: 1px solid var(--line); background: var(--card);
+  h1 { font-size: 1.35rem; margin: 0 0 .15rem; }
+  .lead { color: #555; margin: 0 0 1.2rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ccc; padding: .45rem .6rem; text-align: left; font-size: .95rem; }
+  th { background: #f2f2f2; font-weight: bold; }
+  .ok { color: #1a7f37; font-weight: bold; }
+  .ko { color: #c0392b; font-weight: bold; }
+  .summary { font-weight: bold; }
+  footer {
+    margin-top: 1.5rem; font-size: .8rem; color: #777;
+    border-top: 1px solid #ddd; padding-top: .6rem;
   }
-  .banner.ok   { border-color: var(--up);   color: var(--up); }
-  .banner.fail { border-color: var(--down); color: var(--down); }
-  .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
-  .card {
-    background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 1rem 1.1rem;
-  }
-  .card h2 { margin: 0 0 .4rem; font-size: 1.05rem; display: flex; align-items: center; gap: .55rem; }
-  .dot { width: .7rem; height: .7rem; border-radius: 50%; background: var(--down); flex: none; }
-  .card[data-up="1"] .dot { background: var(--up); box-shadow: 0 0 8px var(--up); }
-  .info { margin: 0; color: var(--muted); font-size: .9rem; word-break: break-word; }
-  .card a { display: inline-block; margin-top: .6rem; color: var(--accent); text-decoration: none; font-size: .9rem; }
-  .card a:hover { text-decoration: underline; }
-  footer { margin-top: 2rem; color: var(--muted); font-size: .85rem; border-top: 1px solid var(--line); padding-top: 1rem; }
-  code { background: var(--card); padding: .1rem .35rem; border-radius: 4px; }
+  code { background: #f5f5f5; padding: 0 .2rem; }
 </style>
 </head>
 <body>
-<main>
-  <h1>NekoSoft 🐾</h1>
-  <p class="sub">Poste de développement Web · Trisquel 12 Mini</p>
 
-  <div class="banner <?= $allUp ? 'ok' : 'fail' ?>">
-    <?= $allUp ? 'Tous les services répondent : le poste est prêt.' : 'Au moins un service ne répond pas (voir ci-dessous).' ?>
-  </div>
+<h1>NekoSoft — état des services</h1>
+<p class="lead">Poste de développement Web · Trisquel 12 Mini</p>
 
-  <section class="grid">
-<?php foreach ($services as $key => [$name, $up, $info, $link]): ?>
-    <article class="card" data-service="<?= h($key) ?>" data-up="<?= $up ? '1' : '0' ?>">
-      <h2><span class="dot"></span><?= h($name) ?></h2>
-      <p class="info"><?= h($up ? $info : 'ne répond pas') ?></p>
-<?php if ($link !== null && $up): ?>
-      <a href="<?= h($link) ?>">Ouvrir <?= h($name) ?> →</a>
+<p class="summary<?= $allUp ? '' : ' ko' ?>">
+<?php if ($allUp): ?>
+  Testé à <?= h(date('H:i')) ?> : tous les services répondent.
+<?php else: ?>
+  Attention : au moins un service ne répond pas (voir le tableau).
 <?php endif; ?>
-    </article>
-<?php endforeach; ?>
-  </section>
+</p>
 
-  <footer>
-    Machine <strong><?= h((string) gethostname()) ?></strong> ·
-    <?= h(php_uname('s') . ' ' . php_uname('r')) ?> ·
-    <?= h(date('d/m/Y H:i')) ?><br>
-    Dossier de développement : <code>/var/www/html</code> · page générée par <code>demo.sh</code>
-  </footer>
-</main>
+<table>
+  <tr>
+    <th>Service</th>
+    <th>État</th>
+    <th>Détails</th>
+  </tr>
+<?php foreach ($services as $key => [$name, $up, $info, $link]): ?>
+  <tr data-service="<?= h($key) ?>" data-up="<?= $up ? '1' : '0' ?>">
+    <td><?= h($name) ?></td>
+    <td class="<?= $up ? 'ok' : 'ko' ?>"><?= $up ? 'OK' : 'erreur' ?></td>
+    <td>
+      <?= h($up ? $info : 'ne répond pas') ?>
+<?php if ($link !== null && $up): ?>
+      — <a href="<?= h($link) ?>">ouvrir</a>
+<?php endif; ?>
+    </td>
+  </tr>
+<?php endforeach; ?>
+</table>
+
+<footer>
+  Machine <strong><?= h((string) gethostname()) ?></strong> ·
+  <?= h(php_uname('s') . ' ' . php_uname('r')) ?> ·
+  <?= h(date('d/m/Y H:i')) ?><br>
+  Dossier de développement : <code>/var/www/html</code> · page générée par <code>demo.sh</code>
+</footer>
+
 </body>
 </html>
